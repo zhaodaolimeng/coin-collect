@@ -1,3 +1,5 @@
+# DEPRECATED since 2026-05 — 被 src.core.voice.pipeline.DuplexCallPipeline 取代
+# 保留此文件仅为向后兼容 src/api/main.py 的历史引用
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """

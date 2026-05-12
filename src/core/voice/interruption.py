@@ -1,3 +1,4 @@
+# DEPRECATED since 2026-05 — 打断逻辑已合并到 src.core.voice.audio_output.DuplexAudioOutput
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
