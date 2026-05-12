@@ -1,12 +1,13 @@
-"""DuplexCallPipeline 单元测试 — 状态机"""
+"""DuplexCallPipeline 单元测试 — 状态机 + 集成测试"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import tempfile
 import numpy as np
 import pytest
 import asyncio
-from core.voice.pipeline import DuplexCallPipeline, PipelineState, PipelineConfig
-from core.voice.audio_source import SilentSource
+from core.voice.pipeline import DuplexCallPipeline, PipelineState, PipelineConfig, StepResult, InterruptionContext
+from core.voice.audio_source import SilentSource, FileSource
 from core.voice.audio_output import DuplexAudioOutput
 
 
@@ -146,3 +147,63 @@ async def test_pipeline_state_callback_fires():
     await pipeline.start()
     assert len(states) >= 1
     assert states[0] == (PipelineState.IDLE, PipelineState.LISTENING)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 集成测试 — FileSource + 全流程
+# ═══════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_pipeline_with_filesource():
+    """Pipeline + FileSource 完整对话"""
+    from scipy.io import wavfile
+    from core.voice.vad import SimpleEnergyVAD
+    sr = 16000
+    data = (np.sin(2 * np.pi * 300 * np.arange(sr) / sr) * 0.3).astype(np.float32)
+    path = tempfile.mktemp(suffix=".wav")
+    wavfile.write(path, sr, data)
+
+    try:
+        source = FileSource(path, sample_rate=sr, block_size=1600, loop=True)
+        output = DuplexAudioOutput(source, barge_in_threshold=0.99)
+        vad = SimpleEnergyVAD(sample_rate=sr, energy_threshold=0.01, voice_frames=2, silence_frames=5)
+        config = PipelineConfig(sample_rate=sr, block_size=1600, silence_duration=0.3, max_speech_duration=5.0)
+        pipeline = DuplexCallPipeline(FakeBot(), source, output, FakeASR(), FakeTTS(), vad, config=config)
+
+        await pipeline.start()
+        for _ in range(200):
+            if pipeline.state == PipelineState.CLOSED:
+                break
+            await pipeline.step()
+            await asyncio.sleep(0.005)
+
+        assert pipeline.state == PipelineState.CLOSED
+        await pipeline.stop()
+    finally:
+        import os; os.unlink(path)
+
+
+def test_step_result_fields():
+    """StepResult 包含正确字段"""
+    result = StepResult(
+        state_from=PipelineState.LISTENING,
+        state_to=PipelineState.PROCESSING,
+        asr_text="Ya",
+        agent_text="Baik",
+        turn_id=1,
+        elapsed_s=0.1,
+    )
+    assert result.turn_id == 1
+    assert result.asr_text == "Ya"
+    assert not result.interrupted
+
+
+def test_interruption_context():
+    """InterruptionContext 数据类"""
+    ctx = InterruptionContext(
+        agent_text_interrupted="Baik, jadi besok jam 5 ya?",
+        agent_playback_position=0.6,
+        customer_rms_peak=0.15,
+    )
+    assert ctx.agent_playback_position == 0.6
+    assert "besok" in ctx.agent_text_interrupted
