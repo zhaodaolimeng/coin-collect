@@ -4,6 +4,7 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections import deque
 
 import numpy as np
 
@@ -203,6 +204,84 @@ class FileSource(AudioSource):
 
     def is_real_time(self) -> bool:
         return False
+
+
+class SimulatedSource(AudioSource):
+    """仿真输入源 — 文本模拟器的 TTS 输出逐块注入，FIFO 消费。
+
+    使用 deque 作为 FIFO 缓冲区，逐块读取模拟实时麦克风的数据到达节奏。"""
+
+    def __init__(
+        self,
+        audio_data: np.ndarray | None = None,
+        sample_rate: int = 16000,
+        block_size: int = 1600,
+    ):
+        self._sample_rate = sample_rate
+        self._block_size = block_size
+        self._chunks: deque = deque()
+        self._running = False
+        self._recent_samples: deque = deque(maxlen=int(0.2 * sample_rate))  # 用于 RMS 计算
+
+        if audio_data is not None and len(audio_data) > 0:
+            self._enqueue(audio_data.astype(np.float32))
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    def append(self, audio: np.ndarray):
+        """追加音频数据到缓冲区"""
+        if len(audio) > 0:
+            self._enqueue(audio.astype(np.float32))
+
+    def _enqueue(self, audio: np.ndarray):
+        """将音频数组拆分成 block_size 块入队"""
+        pos = 0
+        while pos < len(audio):
+            end = min(pos + self._block_size, len(audio))
+            chunk = audio[pos:end]
+            if len(chunk) < self._block_size:
+                chunk = np.pad(chunk, (0, self._block_size - len(chunk)))
+            self._chunks.append(chunk)
+            pos = end
+        # 记录最近的样本用于 RMS
+        if len(audio) <= self._recent_samples.maxlen:
+            for s in audio:
+                self._recent_samples.append(float(s))
+        else:
+            tail = audio[-self._recent_samples.maxlen:]
+            for s in tail:
+                self._recent_samples.append(float(s))
+
+    async def start(self):
+        self._running = True
+
+    async def stop(self):
+        self._running = False
+        self._chunks.clear()
+        self._recent_samples.clear()
+
+    async def read_chunk(self) -> np.ndarray | None:
+        if not self._running:
+            return None
+        if not self._chunks:
+            return None
+        return self._chunks.popleft().copy()
+
+    def current_rms(self) -> float:
+        if not self._recent_samples:
+            return 0.0
+        arr = np.array(list(self._recent_samples), dtype=np.float32)
+        return float(np.sqrt(np.mean(arr ** 2)))
+
+    def is_real_time(self) -> bool:
+        return True
+
+    @property
+    def pending_samples(self) -> int:
+        """缓冲区中剩余未读取的样本数"""
+        return sum(len(c) for c in self._chunks)
 
 
 def _load_audio_mono(path: str, target_sr: int) -> np.ndarray:

@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np
 import pytest
 import asyncio
-from core.voice.audio_source import AudioSource, MicrophoneSource, SilentSource, FileSource
+from core.voice.audio_source import AudioSource, MicrophoneSource, SilentSource, FileSource, SimulatedSource
 
 
 class DummySource(AudioSource):
@@ -178,3 +178,65 @@ def test_file_source_rms_reflects_data():
         asyncio.run(src.stop())
     finally:
         import os; os.unlink(path)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SimulatedSource 测试
+# ═══════════════════════════════════════════════════════════════════
+
+def test_simulated_source_feeds_chunks():
+    """SimulatedSource 逐块注入音频"""
+    sr = 16000
+    audio = np.ones(8000, dtype=np.float32) * 0.3
+    src = SimulatedSource(audio_data=audio, sample_rate=sr, block_size=1600)
+    asyncio.run(src.start())
+    chunks = []
+    while True:
+        c = asyncio.run(src.read_chunk())
+        if c is None:
+            break
+        chunks.append(c)
+    asyncio.run(src.stop())
+    assert len(chunks) == 5  # 8000 / 1600
+
+
+def test_simulated_source_rms():
+    """SimulatedSource.current_rms() 反映当前写入位置附近能量"""
+    sr = 16000
+    audio = np.ones(16000, dtype=np.float32) * 0.5
+    src = SimulatedSource(audio_data=audio, sample_rate=sr, block_size=1600)
+    asyncio.run(src.start())
+    c = asyncio.run(src.read_chunk())
+    rms = src.current_rms()
+    assert rms > 0.0
+    asyncio.run(src.stop())
+
+
+def test_simulated_source_real_time_flag():
+    """SimulatedSource 实时标记为 True"""
+    src = SimulatedSource(audio_data=np.zeros(1600, dtype=np.float32))
+    assert src.is_real_time() is True
+
+
+def test_simulated_source_append():
+    """append() 追加音频数据"""
+    sr = 16000
+    src = SimulatedSource(audio_data=np.zeros(0, dtype=np.float32), sample_rate=sr, block_size=1600)
+    src.append(np.ones(1600, dtype=np.float32) * 0.5)
+    asyncio.run(src.start())
+    c = asyncio.run(src.read_chunk())
+    assert c is not None
+    assert np.max(np.abs(c)) > 0.0
+
+
+def test_simulated_source_stop_clears():
+    """stop() 后清空缓冲区，重新 start 后无数据"""
+    sr = 16000
+    src = SimulatedSource(audio_data=np.ones(3200, dtype=np.float32), sample_rate=sr, block_size=1600)
+    asyncio.run(src.start())
+    c1 = asyncio.run(src.read_chunk())
+    assert c1 is not None
+    asyncio.run(src.stop())
+    asyncio.run(src.start())
+    c = asyncio.run(src.read_chunk())
+    assert c is None  # stop 后缓冲区已清空
