@@ -143,3 +143,96 @@ class SilentSource(AudioSource):
 
     def current_rms(self) -> float:
         return 0.0
+
+
+class FileSource(AudioSource):
+    """文件回放源 — 从 WAV 文件分块读取，模拟实时麦克风。用于测试和回放。"""
+
+    def __init__(
+        self,
+        file_path: str,
+        sample_rate: int = 16000,
+        block_size: int = 1600,
+        loop: bool = False,
+    ):
+        self._file_path = file_path
+        self._sample_rate = sample_rate
+        self._block_size = block_size
+        self._loop = loop
+        self._data: np.ndarray | None = None
+        self._pos = 0
+        self._running = False
+
+    @property
+    def sample_rate(self) -> int:
+        return self._sample_rate
+
+    async def start(self):
+        self._data = _load_audio_mono(self._file_path, self._sample_rate)
+        self._pos = 0
+        self._running = True
+
+    async def stop(self):
+        self._running = False
+        self._data = None
+        self._pos = 0
+
+    async def read_chunk(self) -> np.ndarray | None:
+        if not self._running or self._data is None:
+            return None
+        if self._pos >= len(self._data):
+            if self._loop:
+                self._pos = 0
+            else:
+                return None
+        end = min(self._pos + self._block_size, len(self._data))
+        chunk = self._data[self._pos:end].copy()
+        self._pos = end
+        if len(chunk) < self._block_size:
+            chunk = np.pad(chunk, (0, self._block_size - len(chunk)))
+        return chunk
+
+    def current_rms(self) -> float:
+        if self._data is None or self._pos == 0:
+            return 0.0
+        start = max(0, self._pos - self._block_size)
+        window = self._data[start:self._pos]
+        if len(window) == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(window ** 2)))
+
+    def is_real_time(self) -> bool:
+        return False
+
+
+def _load_audio_mono(path: str, target_sr: int) -> np.ndarray:
+    """加载音频文件为 float32 mono 数组"""
+    try:
+        import soundfile as sf
+        data, sr = sf.read(path, dtype='float32')
+        if data.ndim > 1:
+            data = data[:, 0]
+        if sr != target_sr:
+            from scipy.signal import resample
+            n_samples = int(len(data) * target_sr / sr)
+            data = resample(data, n_samples)
+        return data.astype(np.float32)
+    except ImportError:
+        pass
+    # fallback: scipy wavfile
+    try:
+        from scipy.io import wavfile
+        sr, data = wavfile.read(path)
+        if data.dtype == np.int16:
+            data = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.float32:
+            pass
+        if data.ndim > 1:
+            data = data[:, 0]
+        if sr != target_sr:
+            from scipy.signal import resample
+            n_samples = int(len(data) * target_sr / sr)
+            data = resample(data, n_samples)
+        return data.astype(np.float32)
+    except Exception as e:
+        raise RuntimeError(f"无法加载音频文件 {path}: {e}")

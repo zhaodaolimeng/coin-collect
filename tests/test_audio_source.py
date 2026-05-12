@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import numpy as np
 import pytest
 import asyncio
-from core.voice.audio_source import AudioSource, MicrophoneSource, SilentSource
+from core.voice.audio_source import AudioSource, MicrophoneSource, SilentSource, FileSource
 
 
 class DummySource(AudioSource):
@@ -71,3 +71,110 @@ def test_silent_source_produces_silence():
     assert len(chunk) == 1600
     assert np.max(np.abs(chunk)) == 0.0
     asyncio.run(src.stop())
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FileSource 测试
+# ═══════════════════════════════════════════════════════════════════
+
+def test_file_source_loads_wav():
+    """FileSource 读取 WAV 文件"""
+    import tempfile
+    from scipy.io import wavfile
+    sr = 16000
+    data = (np.sin(2 * np.pi * 440 * np.arange(sr) / sr) * 0.5).astype(np.float32)
+    path = tempfile.mktemp(suffix=".wav")
+    wavfile.write(path, sr, data)
+    try:
+        src = FileSource(path, sample_rate=sr, block_size=1600)
+        asyncio.run(src.start())
+        chunks = []
+        while True:
+            c = asyncio.run(src.read_chunk())
+            if c is None:
+                break
+            chunks.append(c)
+        asyncio.run(src.stop())
+        assert len(chunks) > 0
+        total = sum(len(c) for c in chunks)
+        assert total >= len(data) - 1600
+    finally:
+        import os; os.unlink(path)
+
+
+def test_file_source_reads_in_order():
+    """FileSource 按顺序读取，分块正确"""
+    import tempfile
+    from scipy.io import wavfile
+    sr = 16000
+    data = np.arange(32000, dtype=np.float32) / 32000.0
+    path = tempfile.mktemp(suffix=".wav")
+    wavfile.write(path, sr, data)
+    try:
+        src = FileSource(path, sample_rate=sr, block_size=1600)
+        asyncio.run(src.start())
+        c1 = asyncio.run(src.read_chunk())
+        c2 = asyncio.run(src.read_chunk())
+        asyncio.run(src.stop())
+        np.testing.assert_array_almost_equal(c1, data[:1600])
+        np.testing.assert_array_almost_equal(c2, data[1600:3200])
+    finally:
+        import os; os.unlink(path)
+
+
+def test_file_source_eof_returns_none():
+    """读完文件后返回 None"""
+    import tempfile
+    from scipy.io import wavfile
+    sr = 16000
+    data = np.zeros(800, dtype=np.float32)
+    path = tempfile.mktemp(suffix=".wav")
+    wavfile.write(path, sr, data)
+    try:
+        src = FileSource(path, sample_rate=sr, block_size=1600)
+        asyncio.run(src.start())
+        c1 = asyncio.run(src.read_chunk())
+        assert c1 is not None
+        c2 = asyncio.run(src.read_chunk())
+        assert c2 is None
+        asyncio.run(src.stop())
+    finally:
+        import os; os.unlink(path)
+
+
+def test_file_source_loop_mode():
+    """loop=True 模式文件循环播放"""
+    import tempfile
+    from scipy.io import wavfile
+    sr = 16000
+    data = np.zeros(1600, dtype=np.float32)
+    path = tempfile.mktemp(suffix=".wav")
+    wavfile.write(path, sr, data)
+    try:
+        src = FileSource(path, sample_rate=sr, block_size=1600, loop=True)
+        asyncio.run(src.start())
+        for _ in range(5):
+            c = asyncio.run(src.read_chunk())
+            assert c is not None
+        asyncio.run(src.stop())
+    finally:
+        import os; os.unlink(path)
+
+
+def test_file_source_rms_reflects_data():
+    """FileSource.current_rms() 反映文件数据能量"""
+    import tempfile
+    from scipy.io import wavfile
+    sr = 16000
+    data = np.ones(8000, dtype=np.float32) * 0.5
+    path = tempfile.mktemp(suffix=".wav")
+    wavfile.write(path, sr, data)
+    try:
+        src = FileSource(path, sample_rate=sr, block_size=1600)
+        asyncio.run(src.start())
+        c = asyncio.run(src.read_chunk())
+        rms = src.current_rms()
+        assert rms > 0.0
+        asyncio.run(src.stop())
+    finally:
+        import os; os.unlink(path)
