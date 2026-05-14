@@ -8,7 +8,10 @@ import numpy as np
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class VADState(Enum):
@@ -65,25 +68,19 @@ class SimpleEnergyVAD:
 
     def _calculate_energy(self, audio_frame: np.ndarray) -> float:
         """
-        计算音频帧的能量
+        计算音频帧的能量（RMS 幅值，未归一化）
 
         Args:
-            audio_frame: 音频帧数据
+            audio_frame: 音频帧数据 (float32, 范围约为 [-1.0, 1.0])
 
         Returns:
-            能量值
+            RMS 能量值 (0.0 = 纯静音, ~0.01 = 安静人声, ~0.1+ = 正常语音)
         """
         if len(audio_frame) == 0:
             return 0.0
 
-        # 归一化
-        max_val = np.max(np.abs(audio_frame))
-        if max_val > 0:
-            audio_frame = audio_frame / max_val
-
-        # 计算能量
-        energy = np.mean(audio_frame ** 2)
-        return energy
+        rms = np.sqrt(np.mean(audio_frame.astype(np.float64) ** 2))
+        return float(rms)
 
     def process_frame(self, audio_frame: np.ndarray) -> VADResult:
         """
@@ -141,6 +138,124 @@ class SimpleEnergyVAD:
         self.silence_counter = 0
         self.voice_counter = 0
         self.start_time = None
+
+
+class SileroVAD:
+    """基于 Silero 神经网络的 VAD 检测器。
+
+    将 pipeline 块内部分割为 Silero 要求的帧大小（16kHz=512, 8kHz=256），
+    逐帧推理取最大语音概率。对低幅值音频自动增益后再送模型。
+    """
+
+    # 目标 RMS，低于此值的子帧会被放大
+    _TARGET_RMS = 0.05
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        frame_duration_ms: int = 128,
+        energy_threshold: float = 0.5,
+        voice_frames: int = 1,
+        silence_frames: int = 3,
+    ):
+        self.sample_rate = sample_rate
+        self.frame_duration_ms = frame_duration_ms
+        self.energy_threshold = energy_threshold
+        self.voice_frames = voice_frames
+        self.silence_frames = silence_frames
+
+        self.state = VADState.UNKNOWN
+        self._model = None
+        self._vad_frame_size = 512 if sample_rate == 16000 else 256
+        self._call_count = 0
+        self._voice_counter = 0
+        self._silence_counter = 0
+        self._load_model()
+
+    def _load_model(self):
+        try:
+            from silero_vad import load_silero_vad
+            self._model = load_silero_vad()
+            logger.info(f"[SileroVAD] 模型加载成功 sample_rate={self.sample_rate}")
+        except Exception as e:
+            logger.error(f"[SileroVAD] 模型加载失败: {e}")
+            self._model = None
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+    def process_frame(self, audio_frame: np.ndarray) -> VADResult:
+        if self._model is None:
+            return VADResult(
+                state=VADState.SILENCE, confidence=0.0,
+                timestamp=time.time(), duration=0.0,
+            )
+
+        import torch
+        fs = self._vad_frame_size
+        n_full = len(audio_frame) // fs
+        probs = []
+        for i in range(n_full):
+            sub = audio_frame[i * fs:(i + 1) * fs].copy()
+            # 自动增益：过低的幅值会让神经网络失效
+            rms = float(np.sqrt(np.mean(sub.astype(np.float64) ** 2)))
+            if 0 < rms < self._TARGET_RMS:
+                sub *= (self._TARGET_RMS / rms)
+            tensor = torch.from_numpy(sub.astype(np.float32))
+            probs.append(self._model(tensor, self.sample_rate).item())
+
+        remainder = len(audio_frame) % fs
+        if remainder > 0:
+            sub = np.zeros(fs, dtype=np.float32)
+            sub[:remainder] = audio_frame[n_full * fs:]
+            rms = float(np.sqrt(np.mean(sub.astype(np.float64) ** 2)))
+            if 0 < rms < self._TARGET_RMS:
+                sub *= (self._TARGET_RMS / rms)
+            tensor = torch.from_numpy(sub)
+            probs.append(self._model(tensor, self.sample_rate).item())
+
+        if not probs:
+            return VADResult(
+                state=VADState.SILENCE, confidence=0.0,
+                timestamp=time.time(), duration=0.0,
+            )
+
+        speech_prob = max(probs)
+        timestamp = time.time()
+
+        # 前 20 帧 + 每 50 帧输出概率，便于排查模型是否生效
+        self._call_count += 1
+        if self._call_count <= 20 or self._call_count % 50 == 0:
+            logger.debug(f"[SileroVAD] frame#{self._call_count} "
+                         f"speech_prob={speech_prob:.4f} threshold={self.energy_threshold} "
+                         f"state={'VOICE' if speech_prob >= self.energy_threshold else 'SILENCE'}")
+
+        if speech_prob >= self.energy_threshold:
+            self._voice_counter += 1
+            self._silence_counter = 0
+            if self._voice_counter >= self.voice_frames:
+                self.state = VADState.VOICE
+            confidence = speech_prob
+        else:
+            self._silence_counter += 1
+            self._voice_counter = 0
+            if self._silence_counter >= self.silence_frames:
+                self.state = VADState.SILENCE
+            confidence = speech_prob
+
+        return VADResult(
+            state=self.state,
+            confidence=float(confidence),
+            timestamp=timestamp,
+            duration=0.0,
+        )
+
+    def reset(self):
+        self.state = VADState.UNKNOWN
+        self._call_count = 0
+        self._voice_counter = 0
+        self._silence_counter = 0
 
 
 class VADAnalyzer:

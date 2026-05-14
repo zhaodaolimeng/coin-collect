@@ -624,6 +624,21 @@
             border-radius: 6px;
         }
 
+        .message.debug {
+            justify-content: center;
+            margin: 1px 0;
+        }
+
+        .message.debug .message-bubble {
+            background: #fffbeb;
+            color: #92400e;
+            font-size: 11px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-family: 'SF Mono', 'Menlo', monospace;
+            border-left: 2px solid #f59e0b;
+        }
+
         .message-bubble .original-text {
             /* normal display */
         }
@@ -978,8 +993,9 @@
                 <!-- Mode bar -->
                 <div class="mode-bar" id="modeBar">
                     <button class="mode-tab active" data-mode="manual" id="manualModeTab">文本模式</button>
-                    <button class="mode-tab" data-mode="voice" id="voiceModeTab">语音模式</button>
                     <button class="mode-tab" data-mode="auto" id="autoModeTab">自动模式</button>
+                    <button class="mode-tab" data-mode="voice" id="voiceModeTab">语音模式</button>
+                    <button class="mode-tab" data-mode="duplex" id="duplexModeTab">双工模式</button>
                 </div>
 
                 <!-- Text mode config -->
@@ -997,23 +1013,6 @@
                         <input type="text" id="customerName" placeholder="Pak / Bu" value="Pak Budi">
                     </div>
                     <button class="btn btn-primary" id="newChatBtn">开始对话</button>
-                </div>
-
-                <!-- Voice mode config -->
-                <div class="config-bar hidden" id="voiceConfig">
-                    <div class="config-group">
-                        <label for="voiceChatGroup">催收组别</label>
-                        <select id="voiceChatGroup">
-                            <option value="H2">H2 - 早期</option>
-                            <option value="H1">H1 - 中期</option>
-                            <option value="S0">S0 - 晚期</option>
-                        </select>
-                    </div>
-                    <div class="config-group">
-                        <label for="voiceCustomerName">客户姓名</label>
-                        <input type="text" id="voiceCustomerName" placeholder="Pak / Bu" value="Pak Budi">
-                    </div>
-                    <button class="btn btn-call" id="startCallBtn">📞 开始通话</button>
                 </div>
 
                 <!-- Auto mode config -->
@@ -1056,6 +1055,40 @@
                     <button class="btn btn-start-auto" id="autoSimBtn">▶ 开始自动对话</button>
                 </div>
 
+                <!-- Voice mode config -->
+                <div class="config-bar hidden" id="voiceConfig">
+                    <div class="config-group">
+                        <label for="voiceChatGroup">催收组别</label>
+                        <select id="voiceChatGroup">
+                            <option value="H2">H2 - 早期</option>
+                            <option value="H1">H1 - 中期</option>
+                            <option value="S0">S0 - 晚期</option>
+                        </select>
+                    </div>
+                    <div class="config-group">
+                        <label for="voiceCustomerName">客户姓名</label>
+                        <input type="text" id="voiceCustomerName" placeholder="Pak / Bu" value="Pak Budi">
+                    </div>
+                    <button class="btn btn-call" id="startCallBtn">📞 开始通话</button>
+                </div>
+
+                <!-- Duplex mode config -->
+                <div class="config-bar hidden" id="duplexConfig">
+                    <div class="config-group">
+                        <label for="duplexChatGroup">催收组别</label>
+                        <select id="duplexChatGroup">
+                            <option value="H2">H2 - 早期</option>
+                            <option value="H1">H1 - 中期</option>
+                            <option value="S0">S0 - 晚期</option>
+                        </select>
+                    </div>
+                    <div class="config-group">
+                        <label for="duplexCustomerName">客户姓名</label>
+                        <input type="text" id="duplexCustomerName" placeholder="Pak / Bu" value="Pak Budi">
+                    </div>
+                    <button class="btn btn-call" id="duplexStartBtn">📞 开始双工通话</button>
+                </div>
+
                 <!-- Chat area -->
                 <div class="chat-area" id="chatArea">
                     <div class="welcome-message" id="welcomeMessage">
@@ -1079,6 +1112,16 @@
                     <button class="btn btn-hangup" id="hangupBtn">📞 挂断</button>
                 </div>
 
+                <!-- Duplex call status -->
+                <div class="voice-status hidden" id="duplexStatus">
+                    <div class="voice-status-left">
+                        <span class="voice-rec-dot" id="duplexDot"></span>
+                        <span id="duplexStatusText">等待连接...</span>
+                    </div>
+                    <div class="voice-timer" id="duplexTimer">00:00</div>
+                    <button class="btn btn-hangup" id="duplexHangupBtn">📞 挂断</button>
+                </div>
+
                 <!-- Voice recording controls -->
                 <div class="voice-controls hidden" id="voiceControls">
                     <button class="btn btn-record" id="recordBtn">
@@ -1098,6 +1141,6 @@
         </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=9"></script>
 </body>
 </html>

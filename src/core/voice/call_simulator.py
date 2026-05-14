@@ -271,6 +271,10 @@ class CallSimulator:
         report.tts_failed_count = sum(1 for t in turns if t.tts_failed)
         return report
 
+    def get_report(self) -> SimulationReport:
+        """返回当前仿真报告（公开接口）"""
+        return self._build_report()
+
     async def run_streaming(self, max_turns: int | None = None):
         """流式运行 — 每轮 yield SimulationTurn。用于 SSE 推送给 Web 前端。"""
         self._start_time = time.time()

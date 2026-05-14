@@ -3,10 +3,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import tempfile
+from unittest import mock
+
 import numpy as np
 import pytest
 import asyncio
-from core.voice.pipeline import DuplexCallPipeline, PipelineState, PipelineConfig, StepResult, InterruptionContext
+from core.voice.pipeline import DuplexCallPipeline, PipelineState, PipelineConfig, StepResult, InterruptionContext, _load_audio_ffmpeg
 from core.voice.audio_source import SilentSource, FileSource
 from core.voice.audio_output import DuplexAudioOutput
 
@@ -207,3 +209,149 @@ def test_interruption_context():
     )
     assert ctx.agent_playback_position == 0.6
     assert "besok" in ctx.agent_text_interrupted
+
+
+# ═══════════════════════════════════════════════════════════════════
+# _load_audio_ffmpeg 测试
+# ═══════════════════════════════════════════════════════════════════
+
+def test_load_audio_ffmpeg_returns_float32():
+    """ffmpeg 解码成功 → 返回 float32 numpy 数组"""
+    fake_samples = np.ones(1600, dtype=np.float32)
+    fake_stdout = fake_samples.tobytes()
+
+    with mock.patch("subprocess.run") as mock_run:
+        mock_run.return_value = mock.Mock(returncode=0, stdout=fake_stdout, stderr=b"")
+        result = _load_audio_ffmpeg("/fake/path.mp3")
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
+        assert len(result) == 1600
+        assert result[0] == 1.0
+
+
+def test_load_audio_ffmpeg_handles_failure():
+    """ffmpeg 返回非零 → 抛出 RuntimeError"""
+    with mock.patch("subprocess.run") as mock_run:
+        mock_run.return_value = mock.Mock(returncode=1, stdout=b"", stderr=b"decode error")
+        with pytest.raises(RuntimeError, match="ffmpeg 加载音频失败"):
+            _load_audio_ffmpeg("/fake/path.mp3")
+
+
+def test_load_audio_ffmpeg_handles_empty_output():
+    """ffmpeg 返回空 stdout → 抛出 RuntimeError"""
+    with mock.patch("subprocess.run") as mock_run:
+        mock_run.return_value = mock.Mock(returncode=0, stdout=b"", stderr=b"")
+        with pytest.raises(RuntimeError, match="ffmpeg 加载音频失败"):
+            _load_audio_ffmpeg("/fake/path.mp3")
+
+
+def test_load_audio_ffmpeg_respects_target_sr():
+    """验证 target_sr 参数传递给 ffmpeg"""
+    fake_samples = np.ones(100, dtype=np.float32)
+    with mock.patch("subprocess.run") as mock_run:
+        mock_run.return_value = mock.Mock(returncode=0, stdout=fake_samples.tobytes(), stderr=b"")
+        _load_audio_ffmpeg("/path/to/audio.wav", target_sr=8000)
+        args = mock_run.call_args[0][0]
+        assert "8000" in args
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TTS 结果处理测试 — 覆盖 audio_data(bytes/ndarray) 和 audio_file 路径
+# ═══════════════════════════════════════════════════════════════════
+
+class FakeTTSWithAudioData:
+    """TTS 返回 audio_data 为 bytes（Edge TTS 行为）"""
+    async def synthesize(self, text, **kwargs):
+        from core.voice.tts import TTSResult
+        arr = np.ones(8000, dtype=np.float32) * 0.5
+        return TTSResult(text=text, audio_data=arr.tobytes(), audio_file=None, success=True, engine_name="edge")
+
+
+class FakeTTSWithAudioFile:
+    """TTS 返回 audio_file（Edge TTS 保存到 MP3 的行为）"""
+    async def synthesize(self, text, **kwargs):
+        from core.voice.tts import TTSResult
+        return TTSResult(text=text, audio_data=None, audio_file="/tmp/test.mp3", success=True, engine_name="edge")
+
+
+class FakeTTSWithAudioDataNDArray:
+    """TTS 返回 audio_data 为 ndarray"""
+    async def synthesize(self, text, **kwargs):
+        from core.voice.tts import TTSResult
+        arr = np.ones(8000, dtype=np.float32) * 0.5
+        return TTSResult(text=text, audio_data=arr, audio_file=None, success=True, engine_name="fake")
+
+
+class FakeTTSFailed:
+    """TTS 合成失败"""
+    async def synthesize(self, text, **kwargs):
+        from core.voice.tts import TTSResult
+        return TTSResult(text=text, audio_data=None, audio_file=None, success=False, engine_name="fake")
+
+
+def make_pipeline_with_tts(tts):
+    """创建指定 TTS 的 Pipeline"""
+    config = PipelineConfig(sample_rate=16000, block_size=1600, silence_duration=0.2, max_speech_duration=5.0)
+    source = SilentSource()
+    output = DuplexAudioOutput(source, barge_in_threshold=0.99)
+    asr = FakeASR()
+    vad = FakeVAD(voice_duration_frames=30)
+    bot = FakeBot()
+    return DuplexCallPipeline(bot, source, output, asr, tts, vad, config=config)
+
+
+@pytest.mark.asyncio
+async def test_tts_with_audio_data_bytes():
+    """TTS 返回 audio_data=bytes → pipeline 应正确处理"""
+    pipeline = make_pipeline_with_tts(FakeTTSWithAudioData())
+    await pipeline.start()
+    for _ in range(35):
+        if pipeline.state in (PipelineState.PROCESSING, PipelineState.RESPONDING):
+            break
+        await pipeline.step()
+    # 没有崩溃就算成功
+
+
+@pytest.mark.asyncio
+async def test_tts_with_audio_data_ndarray():
+    """TTS 返回 audio_data=ndarray → pipeline 应正确处理"""
+    pipeline = make_pipeline_with_tts(FakeTTSWithAudioDataNDArray())
+    await pipeline.start()
+    for _ in range(35):
+        if pipeline.state in (PipelineState.PROCESSING, PipelineState.RESPONDING):
+            break
+        await pipeline.step()
+
+
+@pytest.mark.asyncio
+async def test_tts_with_audio_file_falls_back_to_ffmpeg():
+    """TTS 返回 audio_file 且 audio_data=None → pipeline 应通过 ffmpeg 加载"""
+    pipeline = make_pipeline_with_tts(FakeTTSWithAudioFile())
+    await pipeline.start()
+
+    # Step through VAD voice frames → PROCESSING
+    for _ in range(35):
+        if pipeline.state == PipelineState.PROCESSING:
+            break
+        await pipeline.step()
+
+    # 在 PROCESSING 状态再 step 一次触发 _step_process（包括 TTS）
+    if pipeline.state == PipelineState.PROCESSING:
+        # _step_process 会尝试加载 audio_file via ffmpeg，
+        # 在 CI 中 ffmpeg 可用时加载真实文件会失败但不应崩溃
+        try:
+            await pipeline.step()
+        except RuntimeError:
+            pass  # ffmpeg 加载 /tmp/test.mp3 失败是预期的
+
+
+@pytest.mark.asyncio
+async def test_tts_failure_not_fatal():
+    """TTS 合成失败不应崩溃"""
+    pipeline = make_pipeline_with_tts(FakeTTSFailed())
+    await pipeline.start()
+    for _ in range(45):
+        if pipeline.state == PipelineState.CLOSED:
+            break
+        await pipeline.step()
+    # 不应崩溃

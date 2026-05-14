@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, WebSocket, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -427,8 +427,6 @@ async def list_active_sessions(db: Session = Depends(get_db)):
     """返回轻量会话列表：进行中 + 已完成"""
     active_summaries = []
     for sid, bot in active_sessions.items():
-        if bot.is_finished():
-            continue
         state_name = None
         if hasattr(bot.state, 'name'):
             state_name = bot.state.name
@@ -436,7 +434,7 @@ async def list_active_sessions(db: Session = Depends(get_db)):
             session_id=sid,
             chat_group=ChatGroup(bot.chat_group) if bot.chat_group in ["H2","H1","S0"] else ChatGroup.H2,
             customer_name=bot.customer_name,
-            is_finished=False,
+            is_finished=bot.is_finished(),
             is_successful=False,
             state=state_name,
             conversation_length=len(bot.conversation),
@@ -1043,6 +1041,40 @@ async def voice_asr(audio: UploadFile = File(...)):
         return ASRResponse(text='', success=False, error=str(e))
 
 
+@app.websocket("/voice/duplex/ws")
+async def voice_duplex_websocket(websocket: WebSocket):
+    """WebSocket 双工通话端点。浏览器流式推送麦克风音频，服务端实时返回 Agent 音频。
+
+    Query params:
+        chat_group: H2|H1|S0 (default H2)
+        customer_name: 客户名 (default "User")
+    """
+    await websocket.accept()
+
+    try:
+        from urllib.parse import parse_qs
+        qs = parse_qs(str(websocket.url.query))
+        chat_group = qs.get("chat_group", ["H2"])[0]
+        customer_name = qs.get("customer_name", ["User"])[0]
+
+        import uuid
+        from src.core.chatbot import CollectionChatBot
+
+        session_id = str(uuid.uuid4())
+        bot = CollectionChatBot(chat_group=chat_group, customer_name=customer_name)
+        bot.session_id = session_id
+        active_sessions[session_id] = bot
+
+        from src.api.voice_ws_handler import handle_duplex_ws
+        await handle_duplex_ws(websocket, bot)
+    except Exception as e:
+        logger.error(f"WS handler error: {e}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @app.get("/voice/simulate/stream")
 async def voice_simulate_stream(
     persona: str = "cooperative",
@@ -1066,7 +1098,7 @@ async def voice_simulate_stream(
         asr_model: tiny|small|medium (default small)
     """
     from core.chatbot import CollectionChatBot
-    from core.voice.customer_simulator import CustomerVoiceSimulator
+    from core.voice.call_simulator import CallSimulator
     from starlette.responses import StreamingResponse
     import asyncio as aio
 
@@ -1089,10 +1121,10 @@ async def voice_simulate_stream(
 
             # 加载ASR模型时发送心跳
             yield f": loading_asr\n\n"
-            logger.debug(f"[SSE:{conn_id}] Loading CustomerVoiceSimulator...")
+            logger.debug(f"[SSE:{conn_id}] Loading CallSimulator...")
 
             sim_start = asyncio.get_event_loop().time()
-            sim = await CustomerVoiceSimulator.create(
+            sim = await CallSimulator.create(
                 chatbot=bot,
                 persona=persona,
                 resistance_level=resistance,

@@ -3,9 +3,275 @@
  * Two-column layout: session list (left) + chat panel (right)
  * Text mode: human types customer replies
  * Voice mode: human speaks via microphone, ASR + TTS
+ * Duplex mode: full-duplex WebSocket streaming with barge-in
  * Auto mode: fully automatic simulation via SSE
  * Bilingual display: Indonesian + English translation
  */
+
+/* ========== DuplexVoiceClient ========== */
+
+class DuplexVoiceClient {
+    constructor(chatGroup, customerName) {
+        this.chatGroup = chatGroup;
+        this.customerName = customerName;
+        this.ws = null;
+        this.audioContext = null;
+        this.mediaStream = null;
+        this.sourceNode = null;
+        this.processorNode = null;
+        this.analyserNode = null;
+        this.isRunning = false;
+        this.isPlayingAgentAudio = false;
+        this.currentSource = null;  // current AudioBufferSourceNode
+        this._nextPlayTime = 0;     // AudioContext 时间，精确调度无缝拼接
+        this._activeSources = [];   // 所有未播放完的 source 节点
+        this._interrupted = false;  // 打断后拒绝残余 chunk
+        this.onStateChange = null;
+        this.onASRResult = null;
+        this.onAgentText = null;
+        this.onError = null;
+        this.onAgentAudio = null;
+        this.onReady = null;
+        this.onClosed = null;
+    }
+
+    async connect() {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${protocol}//${location.host}/voice/duplex/ws?chat_group=${this.chatGroup}&customer_name=${encodeURIComponent(this.customerName)}`;
+        this.ws = new WebSocket(url);
+        this.ws.binaryType = 'arraybuffer';
+
+        this._nextPlayTime = 0;
+        this._activeSources = [];
+        this._interrupted = false;
+
+        // 提前创建 AudioContext，确保 WebSocket 音频到达时已就绪
+        this.audioContext = new AudioContext({ sampleRate: 16000 });
+        console.log('[Duplex] AudioContext created, state:', this.audioContext.state, 'sampleRate:', this.audioContext.sampleRate);
+        if (this.audioContext.sampleRate !== 16000) {
+            console.warn('[Duplex] WARNING: AudioContext sampleRate is', this.audioContext.sampleRate,
+                'not 16000. Audio will be at wrong rate and ASR may fail.');
+        }
+        if (this.audioContext.state === 'suspended') {
+            await this.audioContext.resume();
+            console.log('[Duplex] AudioContext resumed, state:', this.audioContext.state);
+        }
+
+        this.ws.onmessage = (event) => {
+            if (event.data instanceof ArrayBuffer) {
+                console.log('[Duplex] received audio bytes:', event.data.byteLength);
+                this._playAgentAudio(event.data);
+            } else {
+                try {
+                    const msg = JSON.parse(event.data);
+                    console.log('[Duplex] received message:', msg.type, msg.text ? msg.text.slice(0, 50) : '');
+                    this._handleMessage(msg);
+                } catch (e) {
+                    console.warn('[Duplex] JSON parse error:', e);
+                }
+            }
+        };
+
+        await new Promise((resolve, reject) => {
+            this.ws.onopen = resolve;
+            this.ws.onerror = () => reject(new Error('WebSocket connection failed'));
+        });
+
+        this.ws.onclose = (e) => {
+            console.warn('[Duplex] WebSocket closed, code:', e.code, 'reason:', e.reason, 'wasClean:', e.wasClean);
+            if (this.isRunning) {
+                this.isRunning = false;
+                if (this.onError) this.onError('WebSocket closed unexpectedly (code=' + e.code + ')');
+            }
+        };
+        this.ws.onerror = (e) => {
+            console.error('[Duplex] WebSocket error (post-connect):', e);
+        };
+    }
+
+    async startAudioCapture() {
+        this.mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        console.log('[Duplex] MediaStream acquired, tracks:', this.mediaStream.getAudioTracks().length);
+
+        this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+        this.analyserNode = this.audioContext.createAnalyser();
+        this.analyserNode.fftSize = 256;
+        this.processorNode = this.audioContext.createScriptProcessor(2048, 1, 1);
+
+        this.sourceNode.connect(this.analyserNode);
+        this.sourceNode.connect(this.processorNode);
+        this.processorNode.connect(this.audioContext.destination);
+
+        this._chunkCount = 0;
+        this._lastChunkLog = 0;
+        this.isRunning = true;
+
+        this.processorNode.onaudioprocess = (e) => {
+            const outData = e.outputBuffer.getChannelData(0);
+            outData.fill(0);
+
+            if (!this.isRunning) return;
+            const inputData = e.inputBuffer.getChannelData(0);
+            const float32 = new Float32Array(inputData);
+            let rms = 0;
+            for (let i = 0; i < float32.length; i++) rms += float32[i] * float32[i];
+            rms = Math.sqrt(rms / float32.length);
+            this._chunkCount++;
+            if (this._chunkCount <= 3 || this._chunkCount % 50 === 0) {
+                console.log('[Duplex] chunk#', this._chunkCount, 'mic RMS:', rms.toFixed(4),
+                    'ws:', this.ws ? this.ws.readyState : 'null', 'running:', this.isRunning);
+            }
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(float32.buffer);
+            }
+            if (this.isPlayingAgentAudio) {
+                const bargeRms = this._calculateRMS();
+                if (bargeRms > 0.02) {
+                    this.ws.send(JSON.stringify({ type: 'interrupt' }));
+                    this._stopAgentPlayback();
+                }
+            }
+        };
+    }
+
+    _calculateRMS() {
+        const dataArray = new Float32Array(this.analyserNode.frequencyBinCount);
+        this.analyserNode.getFloatTimeDomainData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i] * dataArray[i];
+        }
+        return Math.sqrt(sum / dataArray.length);
+    }
+
+    _handleMessage(msg) {
+        switch (msg.type) {
+            case 'ready':
+                if (this.onReady) this.onReady(msg);
+                break;
+            case 'state':
+                if (msg.to === 'RESPONDING') {
+                    this._interrupted = false;
+                }
+                if (this.onStateChange) this.onStateChange(msg.from, msg.to);
+                break;
+            case 'asr':
+                if (this.onASRResult) this.onASRResult(msg.text);
+                break;
+            case 'agent_text':
+                if (this.onAgentText) this.onAgentText(msg.text);
+                break;
+            case 'interrupted':
+                this._stopAgentPlayback();
+                break;
+            case 'error':
+                if (this.onError) this.onError(msg.message);
+                break;
+            case 'debug':
+                if (this.onDebug) this.onDebug(msg.text);
+                break;
+            case 'closed':
+                if (this.onClosed) this.onClosed();
+                break;
+        }
+    }
+
+    _playAgentAudio(arrayBuffer) {
+        if (this._interrupted) {
+            return;
+        }
+        if (!this.audioContext) {
+            console.warn('[Duplex] _playAgentAudio: no AudioContext');
+            return;
+        }
+        if (this.audioContext.state === 'suspended') {
+            console.log('[Duplex] AudioContext suspended, resuming...');
+            this.audioContext.resume();
+        }
+        try {
+            const int16 = new Int16Array(arrayBuffer);
+            if (int16.length === 0) {
+                console.warn('[Duplex] _playAgentAudio: empty buffer');
+                return;
+            }
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) {
+                float32[i] = int16[i] / 32768.0;
+            }
+            const buffer = this.audioContext.createBuffer(1, float32.length, 16000);
+            buffer.getChannelData(0).set(float32);
+            const source = this.audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(this.audioContext.destination);
+
+            // 精确调度：每个 chunk 在上一个结束时开始，消除间隙/重叠
+            const now = this.audioContext.currentTime;
+            if (!this._nextPlayTime || this._nextPlayTime < now) {
+                this._nextPlayTime = now;
+            }
+            const startTime = this._nextPlayTime;
+            this._nextPlayTime += buffer.duration;
+
+            this._activeSources.push(source);
+            source.onended = () => {
+                const idx = this._activeSources.indexOf(source);
+                if (idx >= 0) this._activeSources.splice(idx, 1);
+                if (this._activeSources.length === 0) {
+                    this.isPlayingAgentAudio = false;
+                    this.currentSource = null;
+                }
+            };
+
+            this.isPlayingAgentAudio = true;
+            this.currentSource = source;
+            source.start(startTime);
+        } catch (e) {
+            console.error('[Duplex] _playAgentAudio error:', e);
+        }
+    }
+
+    _stopAgentPlayback() {
+        for (const src of this._activeSources) {
+            try { src.stop(); } catch (e) {}
+        }
+        this._activeSources = [];
+        this.currentSource = null;
+        this._nextPlayTime = 0;
+        this.isPlayingAgentAudio = false;
+        this._interrupted = true;
+    }
+
+    stop() {
+        this.isRunning = false;
+        if (this.ws) {
+            try {
+                this.ws.send(JSON.stringify({ type: 'stop' }));
+            } catch (e) {}
+            this.ws.close();
+            this.ws = null;
+        }
+        this._stopAgentPlayback();
+        if (this.processorNode) {
+            this.processorNode.disconnect();
+            this.processorNode = null;
+        }
+        if (this.sourceNode) {
+            this.sourceNode.disconnect();
+            this.sourceNode = null;
+        }
+        if (this.audioContext) {
+            this.audioContext.close();
+            this.audioContext = null;
+        }
+        if (this.mediaStream) {
+            this.mediaStream.getTracks().forEach(t => t.stop());
+            this.mediaStream = null;
+        }
+    }
+}
+
 
 class TelemarketingApp {
     constructor() {
@@ -38,6 +304,13 @@ class TelemarketingApp {
         this.voiceRecordingStart = null;
         this._voiceProcessing = false;
 
+        // Duplex mode state
+        this.duplexCallActive = false;
+        this.duplexClient = null;
+        this.duplexTimerInterval = null;
+        this.duplexStartTime = null;
+        this._duplexAgentText = null;
+
         this._localSessions = [];
 
         this._names = [
@@ -68,12 +341,14 @@ class TelemarketingApp {
         this.completedEmpty = document.getElementById('completedEmpty');
 
         this.manualModeTab = document.getElementById('manualModeTab');
-        this.voiceModeTab = document.getElementById('voiceModeTab');
         this.autoModeTab = document.getElementById('autoModeTab');
+        this.voiceModeTab = document.getElementById('voiceModeTab');
+        this.duplexModeTab = document.getElementById('duplexModeTab');
 
         this.manualConfig = document.getElementById('manualConfig');
-        this.voiceConfig = document.getElementById('voiceConfig');
         this.autoConfig = document.getElementById('autoConfig');
+        this.voiceConfig = document.getElementById('voiceConfig');
+        this.duplexConfig = document.getElementById('duplexConfig');
 
         this.chatGroup = document.getElementById('chatGroup');
         this.customerName = document.getElementById('customerName');
@@ -93,6 +368,18 @@ class TelemarketingApp {
         this.voiceControls = document.getElementById('voiceControls');
         this.recordBtn = document.getElementById('recordBtn');
         this.recordBtnText = document.getElementById('recordBtnText');
+
+        // Duplex mode elements
+        this.duplexModeTab = document.getElementById('duplexModeTab');
+        this.duplexConfig = document.getElementById('duplexConfig');
+        this.duplexChatGroup = document.getElementById('duplexChatGroup');
+        this.duplexCustomerName = document.getElementById('duplexCustomerName');
+        this.duplexStartBtn = document.getElementById('duplexStartBtn');
+        this.duplexStatus = document.getElementById('duplexStatus');
+        this.duplexStatusText = document.getElementById('duplexStatusText');
+        this.duplexDot = document.getElementById('duplexDot');
+        this.duplexTimer = document.getElementById('duplexTimer');
+        this.duplexHangupBtn = document.getElementById('duplexHangupBtn');
 
         this.simPersona = document.getElementById('simPersona');
         this.simResistance = document.getElementById('simResistance');
@@ -119,6 +406,7 @@ class TelemarketingApp {
         // Reset state
         if (this.autoSimRunning) this.stopAutoSimulation();
         if (this.voiceCallActive) this.endVoiceCall();
+        if (this.duplexCallActive) this.endDuplexCall();
         this.sessionId = null;
         this.isFinished = false;
         this.autoSimRunning = false;
@@ -158,8 +446,9 @@ class TelemarketingApp {
         this.newSessionBtn.addEventListener('click', () => this.openNewSession());
 
         this.manualModeTab.addEventListener('click', () => this.switchMode('manual'));
-        this.voiceModeTab.addEventListener('click', () => this.switchMode('voice'));
         this.autoModeTab.addEventListener('click', () => this.switchMode('auto'));
+        this.voiceModeTab.addEventListener('click', () => this.switchMode('voice'));
+        this.duplexModeTab.addEventListener('click', () => this.switchMode('duplex'));
 
         this.newChatBtn.addEventListener('click', () => this.startNewChat());
         this.sendBtn.addEventListener('click', () => this.sendMessage());
@@ -197,6 +486,20 @@ class TelemarketingApp {
             }
         });
 
+        // Duplex mode events
+        if (this.duplexStartBtn) {
+            this.duplexStartBtn.addEventListener('click', () => {
+                if (this.duplexCallActive) {
+                    this.endDuplexCall();
+                } else {
+                    this.startDuplexCall();
+                }
+            });
+        }
+        if (this.duplexHangupBtn) {
+            this.duplexHangupBtn.addEventListener('click', () => this.endDuplexCall());
+        }
+
         this.voiceToggleBtn.addEventListener('click', () => this.toggleVoiceEnabled());
 
         this.autoSimBtn.addEventListener('click', () => {
@@ -214,21 +517,26 @@ class TelemarketingApp {
     /* ========== Mode Switching ========== */
 
     switchMode(mode) {
+        console.log('[App] switchMode called:', mode);
         if (this.autoSimRunning) this.stopAutoSimulation();
         if (this.voiceCallActive) this.endVoiceCall();
+        if (this.duplexCallActive) this.endDuplexCall();
         this.stopAllAudio();
 
         this.mode = mode;
-        this.manualModeTab.classList.toggle('active', mode === 'manual');
-        this.voiceModeTab.classList.toggle('active', mode === 'voice');
-        this.autoModeTab.classList.toggle('active', mode === 'auto');
-        this.manualConfig.classList.toggle('hidden', mode !== 'manual');
-        this.voiceConfig.classList.toggle('hidden', mode !== 'voice');
-        this.autoConfig.classList.toggle('hidden', mode !== 'auto');
-        this.voiceStatus.classList.toggle('hidden', mode !== 'voice');
-        this.voiceControls.classList.toggle('hidden', mode !== 'voice');
+        this.manualModeTab?.classList.toggle('active', mode === 'manual');
+        this.autoModeTab?.classList.toggle('active', mode === 'auto');
+        this.voiceModeTab?.classList.toggle('active', mode === 'voice');
+        this.duplexModeTab?.classList.toggle('active', mode === 'duplex');
+        this.manualConfig?.classList.toggle('hidden', mode !== 'manual');
+        this.autoConfig?.classList.toggle('hidden', mode !== 'auto');
+        this.voiceConfig?.classList.toggle('hidden', mode !== 'voice');
+        this.duplexConfig?.classList.toggle('hidden', mode !== 'duplex');
+        this.voiceStatus?.classList.toggle('hidden', mode !== 'voice');
+        this.voiceControls?.classList.toggle('hidden', mode !== 'voice');
+        this.duplexStatus?.classList.toggle('hidden', mode !== 'duplex');
 
-        this.voiceToggleBtn.style.display = mode === 'auto' ? '' : 'none';
+        if (this.voiceToggleBtn) this.voiceToggleBtn.style.display = mode === 'auto' ? '' : 'none';
 
         if (mode === 'auto') {
             this.inputArea.classList.add('hidden');
@@ -238,6 +546,11 @@ class TelemarketingApp {
             this.inputArea.classList.add('hidden');
             this.resetChat();
             this._warmupASR();
+            this.messageInput.disabled = true;
+            this.sendBtn.disabled = true;
+        } else if (mode === 'duplex') {
+            this.inputArea.classList.add('hidden');
+            this.resetChat();
             this.messageInput.disabled = true;
             this.sendBtn.disabled = true;
         } else {
@@ -555,6 +868,181 @@ class TelemarketingApp {
         this.voiceTimer.textContent = `${mins}:${secs}`;
     }
 
+    /* ========== Duplex Mode ========== */
+
+    async startDuplexCall() {
+        if (this.isLoading || this.duplexCallActive) return;
+
+        this.duplexCallActive = true;
+        this.isLoading = true;
+        this.duplexStartBtn.textContent = '⏹ 结束通话';
+        this.duplexStartBtn.classList.add('running');
+        this.resetChat();
+        this.welcomeMessage.style.display = 'none';
+        this.isFinished = false;
+        this.sessionId = null;
+
+        const group = this.duplexChatGroup.value;
+        const name = this.duplexCustomerName.value.trim() || this.randomName();
+        this.duplexCustomerName.value = this.randomName();
+
+        this.duplexClient = new DuplexVoiceClient(group, name);
+        this._duplexAgentText = null;
+
+        const self = this;
+        this.duplexClient.onReady = (msg) => {
+            self.sessionId = msg.session_id || null;
+
+            const now = new Date().toISOString();
+            self._localSessions.unshift({
+                session_id: msg.session_id,
+                chat_group: group,
+                customer_name: name,
+                is_finished: false,
+                is_successful: false,
+                state: 'LISTENING',
+                conversation_length: 1,
+                start_time: now,
+                end_time: null,
+            });
+            self.loadSessionList();
+
+            if (msg.text) {
+                self.renderMessage('agent', msg.text);
+                self.scrollToBottom();
+            }
+        };
+
+        this.duplexClient.onStateChange = (from, to) => {
+            this.duplexStatusText.textContent = `状态: ${to}`;
+            this.duplexDot.classList.toggle('recording', to === 'LISTENING' || to === 'RESPONDING');
+        };
+
+        this.duplexClient.onASRResult = (text) => {
+            if (text && text.trim()) {
+                this.renderMessage('customer', text);
+                this.scrollToBottom();
+            }
+        };
+
+        this.duplexClient.onAgentText = (text) => {
+            if (text && text !== this._duplexAgentText) {
+                this._duplexAgentText = text;
+                this.renderMessage('agent', text);
+                this.scrollToBottom();
+            }
+        };
+
+        this.duplexClient.onError = (msg) => {
+            this.duplexStatusText.textContent = `错误: ${msg}`;
+        };
+
+        this.duplexClient.onDebug = (text) => {
+            this.renderMessage('debug', text);
+            this.scrollToBottom();
+        };
+
+        this.duplexClient.onClosed = () => {
+            self.isFinished = true;
+            if (self.duplexClient) {
+                self.duplexClient.isRunning = false;
+            }
+            if (self.duplexTimerInterval) {
+                clearInterval(self.duplexTimerInterval);
+                self.duplexTimerInterval = null;
+            }
+            self.duplexStartBtn.textContent = '📞 开始双工通话';
+            self.duplexStartBtn.classList.remove('running', 'hidden');
+            self.duplexConfig.classList.remove('hidden');
+            self.duplexStatusText.textContent = '通话结束';
+            self.duplexDot.classList.remove('recording');
+            self.duplexStartTime = null;
+            self.duplexTimer.textContent = '00:00';
+        };
+
+        // Override onReady to start audio capture after models are loaded
+        const originalOnReady = this.duplexClient.onReady;
+        this.duplexClient.onReady = async (msg) => {
+            if (originalOnReady) originalOnReady(msg);
+            try {
+                await self.duplexClient.startAudioCapture();
+                self.duplexStatusText.textContent = '通话中 (双工)';
+                self.duplexStartTime = Date.now();
+                self._updateDuplexTimer();
+                self.duplexTimerInterval = setInterval(() => self._updateDuplexTimer(), 1000);
+            } catch (err) {
+                alert('麦克风初始化失败: ' + err.message);
+                self.endDuplexCall();
+            }
+        };
+
+        try {
+            this.duplexStatus.classList.remove('hidden');
+            this.duplexStatusText.textContent = '正在加载语音模型...';
+            this.duplexDot.classList.add('recording');
+            this.duplexStartBtn.classList.add('hidden');
+            this.duplexConfig.classList.add('hidden');
+
+            await this.duplexClient.connect();
+        } catch (err) {
+            alert('双工通话初始化失败: ' + err.message);
+            this.endDuplexCall();
+        } finally {
+            this.isLoading = false;
+        }
+    }
+
+    endDuplexCall() {
+        if (!this.duplexCallActive) return;
+
+        this.duplexCallActive = false;
+        this.isFinished = true;
+
+        if (this.duplexClient) {
+            this.duplexClient.stop();
+            this.duplexClient = null;
+        }
+
+        if (this.duplexTimerInterval) {
+            clearInterval(this.duplexTimerInterval);
+            this.duplexTimerInterval = null;
+        }
+        this.duplexStartTime = null;
+
+        this.duplexStartBtn.textContent = '📞 开始双工通话';
+        this.duplexStartBtn.classList.remove('running', 'hidden');
+        this.duplexConfig.classList.remove('hidden');
+        this.duplexStatus.classList.add('hidden');
+        this.duplexDot.classList.remove('recording');
+        this.duplexStatusText.textContent = '等待连接...';
+        this.duplexTimer.textContent = '00:00';
+        this.inputArea.classList.remove('hidden');
+        this._duplexAgentText = null;
+
+        // Mark session as finished in sidebar
+        if (this.sessionId) {
+            const session = this._localSessions.find(s => s.session_id === this.sessionId);
+            if (session) {
+                session.is_finished = true;
+                session.end_time = new Date().toISOString();
+            }
+            this.loadSessionList();
+        }
+        this.sessionId = null;
+
+        this.messageInput.disabled = true;
+        this.sendBtn.disabled = true;
+        this.messageInput.placeholder = '查看历史会话 (只读)';
+    }
+
+    _updateDuplexTimer() {
+        if (!this.duplexStartTime) return;
+        const elapsed = Math.floor((Date.now() - this.duplexStartTime) / 1000);
+        const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+        const secs = (elapsed % 60).toString().padStart(2, '0');
+        this.duplexTimer.textContent = `${mins}:${secs}`;
+    }
+
     /* ========== Session List ========== */
 
     async loadSessionList() {
@@ -640,7 +1128,7 @@ class TelemarketingApp {
         this.sessionList.querySelectorAll('.card-delete-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.showDeleteConfirm(btn, btn.dataset.deleteId);
+                this.executeDelete(btn.dataset.deleteId);
             });
         });
     }
@@ -850,6 +1338,7 @@ class TelemarketingApp {
     }
 
     async startNewChat() {
+        console.log('[App] startNewChat called, isLoading:', this.isLoading, 'newChatBtn:', !!this.newChatBtn);
         if (this.isLoading) return;
 
         this.isLoading = true;
@@ -862,6 +1351,7 @@ class TelemarketingApp {
         const name = this.customerName.value.trim() || this.randomName();
         this.customerName.value = this.randomName();
         const endpoint = this.voiceEnabled ? '/voice/start' : '/chat/start';
+        console.log('[App] startNewChat fetching:', endpoint, { group, name });
 
         try {
             const resp = await fetch(endpoint, {
@@ -876,6 +1366,7 @@ class TelemarketingApp {
             }
 
             const data = await resp.json();
+            console.log('[App] startNewChat response:', { session_id: data.session_id, agent_response: data.agent_response?.slice(0, 40) });
             this.sessionId = data.session_id;
             this.viewingSessionId = null;
 
@@ -906,6 +1397,7 @@ class TelemarketingApp {
 
             this.loadSessionList();
         } catch (err) {
+            console.error('[App] startNewChat error:', err);
             alert('开始对话失败: ' + err.message);
         } finally {
             this.isLoading = false;
@@ -1432,7 +1924,7 @@ class TelemarketingApp {
     async translateMessage(transSpan, text, role) {
         // In auto/voice mode, both sides speak Indonesian → translate to English
         // In text mode, agent speaks Indonesian (→EN), customer types English (→ID)
-        const bothIndonesian = this.mode === 'auto' || this.mode === 'voice';
+        const bothIndonesian = this.mode === 'auto' || this.mode === 'voice' || this.mode === 'duplex';
         const source = (role === 'agent' || bothIndonesian) ? 'id' : 'en';
         const target = (role === 'agent' || bothIndonesian) ? 'en' : 'id';
         const cacheKey = `${text}|${source}|${target}`;
@@ -1605,4 +2097,10 @@ class TelemarketingApp {
 /* ========== Bootstrap ========== */
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new TelemarketingApp();
+    console.log('[App] v6 initialized, mode tabs:', {
+        manual: !!window.app.manualModeTab,
+        auto: !!window.app.autoModeTab,
+        voice: !!window.app.voiceModeTab,
+        duplex: !!window.app.duplexModeTab,
+    });
 });
