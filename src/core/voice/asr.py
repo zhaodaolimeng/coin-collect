@@ -265,15 +265,20 @@ class ASRPipeline:
         return text.strip()
 
     async def transcribe_async(self, audio: np.ndarray) -> str:
-        """异步版本"""
+        """异步版本（保留向后兼容，返回纯文本）"""
+        text, _ = await self.transcribe_with_confidence(audio)
+        return text
+
+    async def transcribe_with_confidence(self, audio: np.ndarray) -> tuple[str, float]:
+        """异步转写，返回 (文本, 置信度)，用于管线过滤"""
         result = await self.asr.transcribe_async(audio)
         if not result.success:
-            return ""
+            return "", 0.0
 
         text = result.text
         if self.corrector:
             text = self.corrector.correct(text)
-        return text.strip()
+        return text.strip(), result.confidence
 
     def transcribe_file(self, audio_path: str) -> str:
         """离线文件转写"""

@@ -158,6 +158,9 @@ class DuplexCallPipeline:
         # 冷却计时 — 播放结束后短时间丢弃音频，避免喇叭回声被 VAD 误识别
         self._listen_cooldown_samples: int = 0  # 还需丢弃的样本数
 
+        # 回声检测 — 保存近期 Agent 回复文本，ASR 结果匹配时拒绝
+        self._recent_agent_texts: collections.deque = collections.deque(maxlen=5)
+
         # 后台播放 task
         self._speak_task: asyncio.Task | None = None
 
@@ -519,22 +522,45 @@ class DuplexCallPipeline:
             if streaming_text.isascii():
                 asr_text = streaming_text
                 self._debug(f"[ASR] 使用流式结果: '{asr_text}'")
-                # 保存音频用于诊断（保存所有结果，不仅仅是短结果）
                 if len(speech) > 0:
                     self._save_asr_audio(speech, asr_text)
+                # 流式结果也做回声检测
+                if self._is_potential_echo(asr_text):
+                    self._debug(f"[ASR] 流式结果回声检测命中，跳过: '{asr_text[:60]}'")
+                    asr_text = ""
             else:
                 self._debug(f"[ASR] 流式结果含非拉丁字符'{streaming_text}'，回退 faster-whisper")
         elif len(speech) > 0:
             try:
-                asr_text = await self._asr.transcribe_async(speech)
+                if hasattr(self._asr, 'transcribe_with_confidence'):
+                    asr_text, confidence = await self._asr.transcribe_with_confidence(speech)
+                else:
+                    asr_text = await self._asr.transcribe_async(speech)
+                    confidence = 1.0
             except Exception as e:
                 logger.error(f"ASR 失败: {e}")
                 asr_text = ""
+                confidence = 0.0
             if asr_text:
                 self._save_asr_audio(speech, asr_text)
-                self._debug(f"[DEBUG] 已保存ASR音频: '{asr_text[:60]}'")
+                self._debug(f"[ASR] 置信度={confidence:.3f} text='{asr_text[:60]}'")
+                # 过滤: 低置信度结果（模型幻觉，"emm"→"Terima kasih"）
+                if confidence < 0.3:
+                    self._debug(f"[ASR] 低置信度({confidence:.3f})，跳过本轮")
+                    asr_text = ""
+                # 过滤: 回声检测（ASR 结果匹配近期 Agent 回复文本）
+                elif self._is_potential_echo(asr_text):
+                    self._debug(f"[ASR] 回声检测命中，跳过本轮: '{asr_text[:60]}'")
+                    asr_text = ""
 
         self._debug(f"[ASR] 转写结果: '{asr_text}'" if asr_text else "[ASR] 转写结果: (空)")
+
+        # ASR 结果被过滤或无结果 → 回退 LISTENING
+        if not asr_text and speech_dur > 0:
+            self._debug("[ASR] 拒绝结果或无输入 → 回退LISTENING")
+            self._listen_cooldown_samples = int(self._config.cooldown_duration * self._config.sample_rate)
+            self._set_state(PipelineState.LISTENING)
+            return
 
         # Bot
         if self._bot_is_finished():
@@ -551,6 +577,10 @@ class DuplexCallPipeline:
             agent_text = ""
 
         self._debug(f"[Bot] 回复: '{agent_text[:80]}'" if agent_text else "[Bot] 回复: (空)")
+
+        # 保存 Agent 回复文本用于回声检测
+        if agent_text:
+            self._recent_agent_texts.append(agent_text)
 
         # TTS
         agent_audio = None
@@ -719,6 +749,20 @@ class DuplexCallPipeline:
         self._debug(f"[ASR-Partial] '{partial_text}'")
 
     # ── 内部方法 ──────────────────────────────────────────
+
+    def _is_potential_echo(self, asr_text: str) -> bool:
+        """检测 ASR 结果是否为最近 Agent TTS 的回声。
+
+        将 ASR 结果与最近 5 条 Agent 回复比较，忽略大小写和首尾空白。
+        若匹配，说明用户端麦克风捕获的是喇叭播放的 TTS 回声而非真实语音。
+        """
+        normalized = asr_text.strip().lower()
+        if len(normalized) < 3:
+            return False
+        for recent in self._recent_agent_texts:
+            if normalized == recent.strip().lower():
+                return True
+        return False
 
     def _set_state(self, new_state: PipelineState):
         old = self._state
