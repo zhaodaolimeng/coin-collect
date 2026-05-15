@@ -53,7 +53,7 @@ class RealTimeASR:
         self.beam_size = beam_size
         self.sample_rate = sample_rate
         self._model = None
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._executor = ThreadPoolExecutor(max_workers=2)
 
     @classmethod
     async def get_instance(cls, **kwargs) -> "RealTimeASR":

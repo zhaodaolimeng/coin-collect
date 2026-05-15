@@ -26,6 +26,7 @@ class DuplexVoiceClient {
         this._nextPlayTime = 0;     // AudioContext 时间，精确调度无缝拼接
         this._activeSources = [];   // 所有未播放完的 source 节点
         this._interrupted = false;  // 打断后拒绝残余 chunk
+        this._bargeInDisabledUntil = 0;  // 新响应播放后短时间内禁止 barge-in，避免环境噪声误触发
         this.onStateChange = null;
         this.onASRResult = null;
         this.onAgentText = null;
@@ -44,6 +45,7 @@ class DuplexVoiceClient {
         this._nextPlayTime = 0;
         this._activeSources = [];
         this._interrupted = false;
+        this._bargeInDisabledUntil = 0;
 
         // 提前创建 AudioContext，确保 WebSocket 音频到达时已就绪
         this.audioContext = new AudioContext({ sampleRate: 16000 });
@@ -127,6 +129,8 @@ class DuplexVoiceClient {
                 this.ws.send(float32.buffer);
             }
             if (this.isPlayingAgentAudio) {
+                // 新响应播放的前 500ms 禁止 barge-in，避免问候语被环境回声截断
+                if (Date.now() < this._bargeInDisabledUntil) return;
                 const bargeRms = this._calculateRMS();
                 if (bargeRms > 0.02) {
                     this.ws.send(JSON.stringify({ type: 'interrupt' }));
@@ -154,6 +158,7 @@ class DuplexVoiceClient {
             case 'state':
                 if (msg.to === 'RESPONDING') {
                     this._interrupted = false;
+                    this._bargeInDisabledUntil = 0;
                 }
                 if (this.onStateChange) this.onStateChange(msg.from, msg.to);
                 break;
@@ -214,6 +219,11 @@ class DuplexVoiceClient {
             const startTime = this._nextPlayTime;
             this._nextPlayTime += buffer.duration;
 
+            // 新响应首次播放时启动 barge-in 保护窗口，避免环境回声/噪声误触发
+            if (!this.isPlayingAgentAudio) {
+                this._bargeInDisabledUntil = Date.now() + 500;
+            }
+
             this._activeSources.push(source);
             source.onended = () => {
                 const idx = this._activeSources.indexOf(source);
@@ -221,6 +231,9 @@ class DuplexVoiceClient {
                 if (this._activeSources.length === 0) {
                     this.isPlayingAgentAudio = false;
                     this.currentSource = null;
+                    if (this.isRunning && !this._interrupted && this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify({ type: 'playback_done' }));
+                    }
                 }
             };
 
@@ -241,6 +254,7 @@ class DuplexVoiceClient {
         this._nextPlayTime = 0;
         this.isPlayingAgentAudio = false;
         this._interrupted = true;
+        this._bargeInDisabledUntil = 0;
     }
 
     stop() {
@@ -312,6 +326,8 @@ class TelemarketingApp {
         this._duplexAgentText = null;
 
         this._localSessions = [];
+        this._debugMessages = new Map();  // sessionId → [{text, timestamp}]
+        this._restoringDebug = false;
 
         this._names = [
             'Pak Budi', 'Bu Siti', 'Pak Ahmad', 'Bu Dewi', 'Pak Rudi',
@@ -1208,6 +1224,15 @@ class TelemarketingApp {
                 this.renderMessage(entry.role, entry.text, null, entry.timestamp);
             }
 
+            // 恢复该会话的调试消息
+            if (this._debugMessages.has(sessionId)) {
+                this._restoringDebug = true;
+                for (const dm of this._debugMessages.get(sessionId)) {
+                    this.renderMessage('debug', dm.text, null, dm.timestamp);
+                }
+                this._restoringDebug = false;
+            }
+
             this.scrollToBottom();
 
             // If session is active (not finished), reconnect for interaction
@@ -1866,7 +1891,13 @@ class TelemarketingApp {
 
         const originalSpan = document.createElement('span');
         originalSpan.className = 'original-text';
-        originalSpan.textContent = text;
+
+        if (role === 'debug') {
+            const ms = String(now.getMilliseconds()).padStart(3, '0');
+            originalSpan.textContent = `[${timeStr}.${ms}] ${text}`;
+        } else {
+            originalSpan.textContent = text;
+        }
         bubble.appendChild(originalSpan);
 
         const transSpan = document.createElement('span');
@@ -1891,16 +1922,28 @@ class TelemarketingApp {
             wrapper.appendChild(actions);
         }
 
-        const timeDiv = document.createElement('div');
-        timeDiv.className = 'message-time';
-        timeDiv.textContent = timeStr;
-        wrapper.appendChild(timeDiv);
+        if (role !== 'debug') {
+            const timeDiv = document.createElement('div');
+            timeDiv.className = 'message-time';
+            timeDiv.textContent = timeStr;
+            wrapper.appendChild(timeDiv);
+        }
 
         msgDiv.appendChild(wrapper);
         this.chatArea.appendChild(msgDiv);
         this.scrollToBottom();
 
-        this.translateMessage(transSpan, text, role);
+        // 缓存调试消息以便在会话切换后恢复
+        if (role === 'debug' && this.sessionId && !this._restoringDebug) {
+            if (!this._debugMessages.has(this.sessionId)) {
+                this._debugMessages.set(this.sessionId, []);
+            }
+            this._debugMessages.get(this.sessionId).push({ text, timestamp: now.toISOString() });
+        }
+
+        if (role !== 'debug') {
+            this.translateMessage(transSpan, text, role);
+        }
 
         // Voice mode: auto-play agent TTS, highlight play button if blocked
         if (audioUrl && role === 'agent' && this.mode === 'voice') {

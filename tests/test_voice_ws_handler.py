@@ -229,13 +229,13 @@ async def test_greeting_sent_with_session_id():
     from src.api.voice_ws_handler import handle_duplex_ws
     await handle_duplex_ws(ws, bot)
 
-    greeting_msgs = [json.loads(m) for m in ws.sent_messages
-                     if '"type":"greeting"' in m or '"type": "greeting"' in m]
-    assert len(greeting_msgs) >= 1
-    greeting = greeting_msgs[0]
-    assert greeting["type"] == "greeting"
-    assert greeting["session_id"] == "test-session-abc123"
-    assert "text" in greeting
+    ready_msgs = [json.loads(m) for m in ws.sent_messages
+                     if '"type":"ready"' in m or '"type": "ready"' in m or '"type": "greeting"' in m]
+    assert len(ready_msgs) >= 1
+    ready = ready_msgs[0]
+    assert ready["type"] in ("ready", "greeting")
+    assert ready["session_id"] == "test-session-abc123"
+    assert "text" in ready
 
 
 @pytest.mark.asyncio
@@ -253,14 +253,14 @@ async def test_greeting_sent_before_state_events():
     for i, msg in enumerate(ws.sent_messages):
         try:
             parsed = json.loads(msg)
-            if parsed.get("type") == "greeting":
+            if parsed.get("type") in ("ready", "greeting"):
                 first_json_idx = i
                 break
         except json.JSONDecodeError:
             continue
 
-    assert first_json_idx is not None, "未找到 greeting 消息"
-    assert first_json_idx <= 1, f"greeting 在第 {first_json_idx} 条消息，太靠后了"
+    assert first_json_idx is not None, "未找到 ready/greeting 消息"
+    assert first_json_idx <= 1, f"ready/greeting 在第 {first_json_idx} 条消息，太靠后了"
 
 
 # ── 中断与状态事件测试 ──────────────────────────────────────
@@ -280,11 +280,11 @@ async def test_state_change_events_sent():
     from src.api.voice_ws_handler import handle_duplex_ws
     await handle_duplex_ws(ws, bot)
 
-    # 至少应该有 greeting 消息（状态事件通过 asyncio.ensure_future 异步发送，
+    # 至少应该有 ready 或 greeting 消息（状态事件通过 asyncio.ensure_future 异步发送，
     # 在 MockWebSocket 快速消费所有消息后可能尚未执行）
-    greeting_msgs = [json.loads(m) for m in ws.sent_messages
-                     if '"type":"greeting"' in m or '"type": "greeting"' in m]
-    assert len(greeting_msgs) >= 1
+    ready_msgs = [json.loads(m) for m in ws.sent_messages
+                     if '"type":"ready"' in m or '"type": "ready"' in m or '"type":"greeting"' in m or '"type": "greeting"' in m]
+    assert len(ready_msgs) >= 1
     # 处理了音频块且未崩溃即算成功
 
 

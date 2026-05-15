@@ -136,9 +136,9 @@ class WebSocketAudioOutput(DuplexAudioOutput):
     async def _play_with_interrupt_detection(self, audio: np.ndarray) -> PlaybackResult:
         """覆盖父类：发送到浏览器而非 sounddevice。
 
-        两阶段:
-        1. 以最快速度发送所有 chunk（前端调度精确播放时间，消除间隙）
-        2. 等待实际播放时长结束（保持 RESPONDING 状态，响应前端打断）
+        快速发送所有 chunk 后立即返回，不再等待前端播放完成。
+        前端负责精确调度播放时间（_nextPlayTime），并在播放完成后发送 playback_done。
+        打断由前端通过 interrupt 消息触发。
         """
         sr = self._source.sample_rate
         chunk_samples = int(self._chunk_duration * sr)
@@ -148,7 +148,6 @@ class WebSocketAudioOutput(DuplexAudioOutput):
             logger.warning("send_chunk 未设置，无法播放")
             return PlaybackResult.FAILED
 
-        # Phase 1: 快速发送所有 chunk
         while pos < len(audio) and not self._stop_requested:
             end = min(pos + chunk_samples, len(audio))
             chunk = audio[pos:end]
@@ -161,17 +160,6 @@ class WebSocketAudioOutput(DuplexAudioOutput):
 
             pos = end
             await asyncio.sleep(0)
-
-        if self._stop_requested:
-            return PlaybackResult.INTERRUPTED
-
-        # Phase 2: 等待前端实际播放完成
-        total_duration = len(audio) / sr
-        elapsed = 0.0
-        check_interval = 0.1
-        while elapsed < total_duration and not self._stop_requested:
-            await asyncio.sleep(check_interval)
-            elapsed += check_interval
 
         if self._stop_requested:
             return PlaybackResult.INTERRUPTED

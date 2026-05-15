@@ -67,7 +67,11 @@ def feed_to_source(source, audio: np.ndarray):
 
 
 async def run_pipeline_until(pipeline, target_states: set, max_steps: int = 400):
-    """逐 step 推进管线直到进入目标状态集合，返回经历的状态转移"""
+    """逐 step 推进管线直到进入目标状态集合，返回经历的状态转移
+
+    新 _step_respond 需要前端 playback_done 才会退出 RESPONDING。
+    测试中自动通知，模拟前端播放完成。
+    """
     transitions = []
     entered_processing = False
     for _ in range(max_steps):
@@ -78,6 +82,9 @@ async def run_pipeline_until(pipeline, target_states: set, max_steps: int = 400)
         await asyncio.sleep(0.01)
         if pipeline.state == PipelineState.PROCESSING:
             entered_processing = True
+        # 模拟前端播放完成通知，避免 RESPONDING 卡住
+        if pipeline.state == PipelineState.RESPONDING and pipeline._respond_audio_sent:
+            pipeline.notify_playback_done()
         # 只有经过 PROCESSING 后才允许在 LISTENING/CLOSED 停止
         if pipeline.state in target_states:
             if entered_processing or PipelineState.PROCESSING in target_states:

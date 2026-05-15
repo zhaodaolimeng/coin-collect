@@ -438,20 +438,20 @@ class TTSManager:
         self._register_default_engines()
 
     def _register_default_engines(self):
-        """注册默认引擎（Edge-TTS 优先，质量更好）"""
-        # Edge-TTS（优先 - 质量好，无需本地模型）
-        edge_engine = EdgeTTSEngine()
-        if edge_engine.is_available():
-            self.engines[edge_engine.get_engine_name()] = edge_engine
-            if self.default_engine is None:
-                self.default_engine = edge_engine.get_engine_name()
-
-        # Piper-TTS（备选 - 纯本地，无需网络）
+        """注册默认引擎（本地 Piper-TTS 优先，低延迟）"""
+        # Piper-TTS（优先 - 纯本地，无需网络，亚实时合成）
         piper_engine = PiperTTSEngine()
         if piper_engine.is_available():
             self.engines[piper_engine.get_engine_name()] = piper_engine
             if self.default_engine is None:
                 self.default_engine = piper_engine.get_engine_name()
+
+        # Edge-TTS（备选 - 网络TTS，质量更好但延迟高）
+        edge_engine = EdgeTTSEngine()
+        if edge_engine.is_available():
+            self.engines[edge_engine.get_engine_name()] = edge_engine
+            if self.default_engine is None:
+                self.default_engine = edge_engine.get_engine_name()
 
         # Coqui-TTS（备选）
         coqui_engine = CoquiTTSEngine()

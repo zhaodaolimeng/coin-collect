@@ -32,7 +32,7 @@ def _load_audio_file(file_path: str, target_sr: int = 16000) -> np.ndarray:
 async def handle_duplex_ws(websocket, chatbot):
     """处理 WebSocket 双工通话连接"""
     source = WebSocketAudioSource(sample_rate=16000, block_size=2048)
-    vad = SileroVAD(sample_rate=16000, frame_duration_ms=128, energy_threshold=0.5, voice_frames=3, silence_frames=3)
+    vad = SileroVAD(sample_rate=16000, frame_duration_ms=128, energy_threshold=0.25, voice_frames=1, silence_frames=5)
     session_id = getattr(chatbot, "session_id", "")
 
     # 1. 获取问候文本（稍后在 ready 消息中发送）
@@ -88,8 +88,11 @@ async def handle_duplex_ws(websocket, chatbot):
         return tts, audio
 
     async def _init_asr(chatbot):
+        # 使用 faster-whisper tiny 模型 + 增长窗口流式
+        # sherpa-onnx 多语言模型印尼语质量不可靠，已禁用
         from core.voice.asr import ASRPipeline
         corrector = getattr(chatbot, "asr_corrector", None)
+        logger.info("[Duplex] ASR: faster-whisper small + 增长窗口流式")
         return await ASRPipeline.create(model_size="small", corrector=corrector)
 
     tts_task = asyncio.create_task(_init_tts(greeting_text))
@@ -165,6 +168,8 @@ async def handle_duplex_ws(websocket, chatbot):
                     on_debug(f"[客户端] 收到interrupt消息, 当前状态={pipeline.state.name}")
                     pipeline.handle_interruption()
                     await _safe_send_json(websocket, {"type": "interrupted"})
+                elif msg.get("type") == "playback_done":
+                    pipeline.notify_playback_done()
                 elif msg.get("type") == "stop":
                     on_debug("[客户端] 收到stop消息")
                     break
@@ -190,6 +195,8 @@ async def handle_duplex_ws(websocket, chatbot):
 async def _run_pipeline(pipeline, websocket):
     """后台轮询管线 step()"""
     step_count = 0
+    last_asr = None
+    last_agent = None
     try:
         while pipeline.state != PipelineState.CLOSED:
             result = await pipeline.step()
@@ -197,10 +204,12 @@ async def _run_pipeline(pipeline, websocket):
                 step_count += 1
                 if step_count % 100 == 0:
                     logger.debug(f"[Duplex] step={step_count} state={pipeline.state.name}")
-                if result.asr_text:
+                if result.asr_text and result.asr_text != last_asr:
+                    last_asr = result.asr_text
                     logger.info(f"[Duplex] ASR text: {result.asr_text[:80]}")
                     await _safe_send_json(websocket, {"type": "asr", "text": result.asr_text})
-                if result.agent_text:
+                if result.agent_text and result.agent_text != last_agent:
+                    last_agent = result.agent_text
                     logger.info(f"[Duplex] Agent text: {result.agent_text[:80]}")
                     await _safe_send_json(websocket, {"type": "agent_text", "text": result.agent_text})
             await asyncio.sleep(0.01)

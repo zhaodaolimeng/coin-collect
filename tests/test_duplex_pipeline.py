@@ -132,10 +132,12 @@ async def test_pipeline_full_cycle_to_close():
     """完整走完到 CLOSED"""
     pipeline = make_pipeline()
     await pipeline.start()
-    for _ in range(200):
+    for _ in range(500):
         if pipeline.state == PipelineState.CLOSED:
             break
         await pipeline.step()
+        if pipeline.state == PipelineState.RESPONDING and pipeline._respond_audio_sent:
+            pipeline.notify_playback_done()
         await asyncio.sleep(0.01)
     assert pipeline.state == PipelineState.CLOSED
 
@@ -173,10 +175,12 @@ async def test_pipeline_with_filesource():
         pipeline = DuplexCallPipeline(FakeBot(), source, output, FakeASR(), FakeTTS(), vad, config=config)
 
         await pipeline.start()
-        for _ in range(200):
+        for _ in range(800):
             if pipeline.state == PipelineState.CLOSED:
                 break
             await pipeline.step()
+            if pipeline.state == PipelineState.RESPONDING and pipeline._respond_audio_sent:
+                pipeline.notify_playback_done()
             await asyncio.sleep(0.005)
 
         assert pipeline.state == PipelineState.CLOSED
