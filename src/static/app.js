@@ -960,6 +960,7 @@ class TelemarketingApp {
 
         this.duplexClient.onClosed = () => {
             self.isFinished = true;
+            self.duplexCallActive = false;
             if (self.duplexClient) {
                 self.duplexClient.isRunning = false;
             }
@@ -974,6 +975,19 @@ class TelemarketingApp {
             self.duplexDot.classList.remove('recording');
             self.duplexStartTime = null;
             self.duplexTimer.textContent = '00:00';
+            self.inputArea.classList.remove('hidden');
+            self._duplexAgentText = null;
+
+            // 标记会话已完成并更新侧边栏
+            if (self.sessionId) {
+                const session = self._localSessions.find(s => s.session_id === self.sessionId);
+                if (session) {
+                    session.is_finished = true;
+                    session.end_time = new Date().toISOString();
+                }
+                self.loadSessionList();
+            }
+            self.sessionId = null;
         };
 
         // Override onReady to start audio capture after models are loaded
