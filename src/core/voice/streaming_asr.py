@@ -34,7 +34,7 @@ class StreamingASR:
         self._config = config or StreamingASRConfig()
 
         self._generation: int = 0        # 递增取消计数器
-        self._in_flight: bool = False    # ASR 任务运行中
+        self._in_flight_count: int = 0   # 并发 ASR 任务计数 (max_workers=2)
         self._last_full_text: str = ""   # 最近完整转写结果
         self._is_final: bool = False     # mark_final() 已调用
         self._final_text: str = ""       # 最终结果缓存
@@ -77,7 +77,7 @@ class StreamingASR:
     def mark_final(self) -> None:
         """标记最终提交，忽略后续 submit()。"""
         self._is_final = True
-        if not self._in_flight and self._active:
+        if self._in_flight_count == 0 and self._active:
             self._final_text = self._last_full_text
             self._final_ready.set()
         if not self._active:
@@ -94,7 +94,7 @@ class StreamingASR:
     def reset(self) -> None:
         """重置状态，准备新一轮对话。"""
         self._generation = 0
-        self._in_flight = False
+        self._in_flight_count = 0
         self._last_full_text = ""
         self._is_final = False
         self._final_text = ""
@@ -105,7 +105,7 @@ class StreamingASR:
 
     async def _run_transcribe(self, audio: np.ndarray, gen: int) -> None:
         """在 executor 中运行 ASR，完成后检查 generation 并去重。"""
-        self._in_flight = True
+        self._in_flight_count += 1
         try:
             full_text = await self._asr.transcribe_async(audio)
             if not isinstance(full_text, str):
@@ -114,7 +114,7 @@ class StreamingASR:
             logger.error(f"StreamingASR 转写失败: {e}")
             full_text = ""
         finally:
-            self._in_flight = False
+            self._in_flight_count -= 1
 
         async with self._lock:
             if gen != self._generation:

@@ -82,8 +82,10 @@ async def run_pipeline_until(pipeline, target_states: set, max_steps: int = 400)
         await asyncio.sleep(0.01)
         if pipeline.state == PipelineState.PROCESSING:
             entered_processing = True
-        # 模拟前端播放完成通知，避免 RESPONDING 卡住
+        # 模拟前端播放完成通知，避免 RESPONDING/CLOSING 卡住
         if pipeline.state == PipelineState.RESPONDING and pipeline._respond_audio_sent:
+            pipeline.notify_playback_done()
+        if pipeline.state == PipelineState.CLOSING and pipeline._respond_audio_sent:
             pipeline.notify_playback_done()
         # 只有经过 PROCESSING 后才允许在 LISTENING/CLOSED 停止
         if pipeline.state in target_states:
@@ -652,6 +654,10 @@ async def test_bot_close_triggers_closed():
     for _ in range(500):
         await pipeline.step()
         await asyncio.sleep(0.01)
+        if pipeline.state == PipelineState.RESPONDING and pipeline._respond_audio_sent:
+            pipeline.notify_playback_done()
+        if pipeline.state == PipelineState.CLOSING and pipeline._respond_audio_sent:
+            pipeline.notify_playback_done()
         if pipeline.state == PipelineState.CLOSED:
             break
 

@@ -138,6 +138,8 @@ async def test_pipeline_full_cycle_to_close():
         await pipeline.step()
         if pipeline.state == PipelineState.RESPONDING and pipeline._respond_audio_sent:
             pipeline.notify_playback_done()
+        if pipeline.state == PipelineState.CLOSING and pipeline._respond_audio_sent:
+            pipeline.notify_playback_done()
         await asyncio.sleep(0.01)
     assert pipeline.state == PipelineState.CLOSED
 

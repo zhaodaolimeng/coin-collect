@@ -336,6 +336,8 @@ async def test_pipeline_streaming_single_turn():
         await pipeline.step()
         if pipeline.state.name == "RESPONDING" and pipeline._respond_audio_sent:
             pipeline.notify_playback_done()
+        if pipeline.state.name == "CLOSING" and pipeline._respond_audio_sent:
+            pipeline.notify_playback_done()
         await asyncio.sleep(0.01)
 
     assert pipeline.state.name == "CLOSED", f"Expected CLOSED, got {pipeline.state.name}"

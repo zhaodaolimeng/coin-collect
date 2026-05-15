@@ -495,6 +495,7 @@ class DuplexCallPipeline:
             self._debug(f"[PROCESS] ASR等待超时 → 回退LISTENING")
             self._asr_wait_retries = 0
             self._set_state(PipelineState.LISTENING)
+            self._listen_cooldown_samples = int(self._config.cooldown_duration * self._config.sample_rate)
             return
         self._asr_wait_retries = 0
 
@@ -607,20 +608,23 @@ class DuplexCallPipeline:
             return  # 发送尚未完成，继续等待
 
         if not self._frontend_playback_done:
-            # 消费积压音频，防止队列溢出 (maxsize=200)
+            # 仅当队列接近满载时才排空旧数据，避免丢弃用户可能在
+            # Agent 播放末尾开始的轻声语音（未达前端 barge-in 阈值）
             if hasattr(self._source, '_queue'):
-                while not self._source._queue.empty():
-                    try:
-                        self._source._queue.get_nowait()
-                    except Exception:
-                        break
+                q = self._source._queue
+                if q.qsize() > q.maxsize * 0.8:
+                    while q.qsize() > q.maxsize * 0.5:
+                        try:
+                            q.get_nowait()
+                        except Exception:
+                            break
             return
 
         # 前端确认播放完成
         self._debug("[PLAY] 收到 playback_done，播放完成")
         if hasattr(self._source, 'flush'):
-            self._source.flush(keep_recent_s=0.2)
-            self._debug("[FLUSH] 播放结束，已清理过期音频队列（保留最近0.2秒）")
+            self._source.flush(keep_recent_s=0.5)
+            self._debug("[FLUSH] 播放结束，已清理过期音频队列（保留最近0.5秒）")
         self._respond_audio_sent = False
         self._frontend_playback_done = False
         if self._bot_is_finished():
@@ -643,9 +647,46 @@ class DuplexCallPipeline:
         self._set_state(PipelineState.LISTENING)
 
     async def _step_closing(self):
-        """CLOSING: 播放结束语后停止"""
-        if self._current_agent_audio is not None and len(self._current_agent_audio) > 0:
-            await self._output.speak(self._current_agent_audio)
+        """CLOSING: 发送结束语后等待前端播放完成，再进入 CLOSED
+
+        仿照 _step_respond 两阶段模式:
+        - 阶段 A: 发送结束语音频（无音频时直接跳过两阶段）
+        - 阶段 B: 等待 playback_done，确保用户听到完整结束语
+        """
+        if not self._respond_audio_sent:
+            # 阶段 A: 发送音频（无音频时直接进入 CLOSED）
+            if self._current_agent_audio is not None and len(self._current_agent_audio) > 0:
+                dur = len(self._current_agent_audio) / self._config.sample_rate
+                self._debug(f"[CLOSING] 发送结束语: {len(self._current_agent_audio)}样本({dur:.1f}s)")
+                self._speak_task = asyncio.create_task(
+                    self._output.speak(self._current_agent_audio)
+                )
+                self._respond_audio_sent = True
+                return
+            else:
+                # 无结束音频 → 直接关闭
+                self._debug("[CLOSING] 无结束语 → CLOSED")
+                self._running = False
+                self._set_state(PipelineState.CLOSED)
+                return
+
+        # 阶段 B: 等待前端 playback_done
+        if self._speak_task and not self._speak_task.done():
+            return  # 发送尚未完成
+
+        if not self._frontend_playback_done:
+            # 仅当队列接近满载时才排空
+            if hasattr(self._source, '_queue'):
+                q = self._source._queue
+                if q.qsize() > q.maxsize * 0.8:
+                    while q.qsize() > q.maxsize * 0.5:
+                        try:
+                            q.get_nowait()
+                        except Exception:
+                            break
+            return
+
+        self._debug("[CLOSING] 结束语播放完成 → CLOSED")
         self._running = False
         self._set_state(PipelineState.CLOSED)
 
