@@ -251,6 +251,72 @@ class SileroVAD:
             duration=0.0,
         )
 
+    def find_speech_segments(
+        self, audio: np.ndarray,
+        threshold: float | None = None,
+        min_speech_ms: int = 400,
+        max_gap_ms: int = 300,
+    ) -> list[tuple[int, int]]:
+        """精确定位语音段边界（离线分析），返回 [(start_sample, end_sample), ...]。
+
+        逐帧推理 SileroVAD，获取 speech_prob 时间线后查找连续语音区。
+        max_gap_ms 以内的停顿视为语流内停顿，不切分。
+        min_speech_ms 以下的短段视为噪声碎片，丢弃。
+
+        Args:
+            audio: float32 音频数组
+            threshold: 语音概率阈值，默认使用 self.energy_threshold
+            min_speech_ms: 最短语音段（毫秒）
+            max_gap_ms: 语流内最大间隙（毫秒）
+        """
+        if self._model is None or len(audio) == 0:
+            return [(0, len(audio))] if len(audio) > 0 else []
+
+        threshold = threshold if threshold is not None else self.energy_threshold
+        fs = self._vad_frame_size
+        n_full = len(audio) // fs
+        if n_full == 0:
+            return [(0, len(audio))]
+
+        import torch
+        probs = np.empty(n_full, dtype=np.float32)
+        for i in range(n_full):
+            sub = audio[i * fs:(i + 1) * fs].copy()
+            rms = float(np.sqrt(np.mean(sub.astype(np.float64) ** 2)))
+            if 0 < rms < self._TARGET_RMS:
+                sub *= (self._TARGET_RMS / rms)
+            tensor = torch.from_numpy(sub.astype(np.float32))
+            probs[i] = self._model(tensor, self.sample_rate).item()
+
+        is_speech = probs >= threshold
+        min_frames = max(1, min_speech_ms * self.sample_rate // 1000 // fs)
+        max_gap_frames = max_gap_ms * self.sample_rate // 1000 // fs
+
+        segments: list[tuple[int, int]] = []
+        i = 0
+        while i < n_full:
+            if is_speech[i]:
+                start = i
+                gap_start = -1
+                while i < n_full:
+                    if is_speech[i]:
+                        gap_start = -1
+                    else:
+                        if gap_start < 0:
+                            gap_start = i
+                        if i - gap_start >= max_gap_frames:
+                            break
+                    i += 1
+                end = i
+                while end > start and not is_speech[end - 1]:
+                    end -= 1
+                if end - start >= min_frames:
+                    segments.append((start * fs, min(end * fs, len(audio))))
+            else:
+                i += 1
+
+        return segments if segments else []
+
     def reset(self):
         self.state = VADState.UNKNOWN
         self._call_count = 0

@@ -971,12 +971,16 @@ class TelemarketingApp {
             self.duplexStartBtn.textContent = '📞 开始双工通话';
             self.duplexStartBtn.classList.remove('running', 'hidden');
             self.duplexConfig.classList.remove('hidden');
+            self.duplexStatus.classList.add('hidden');
             self.duplexStatusText.textContent = '通话结束';
             self.duplexDot.classList.remove('recording');
             self.duplexStartTime = null;
             self.duplexTimer.textContent = '00:00';
             self.inputArea.classList.remove('hidden');
             self._duplexAgentText = null;
+            self.messageInput.disabled = true;
+            self.sendBtn.disabled = true;
+            self.messageInput.placeholder = '查看历史会话 (只读)';
 
             // 标记会话已完成并更新侧边栏
             if (self.sessionId) {

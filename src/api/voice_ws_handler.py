@@ -32,7 +32,7 @@ def _load_audio_file(file_path: str, target_sr: int = 16000) -> np.ndarray:
 async def handle_duplex_ws(websocket, chatbot):
     """处理 WebSocket 双工通话连接"""
     source = WebSocketAudioSource(sample_rate=16000, block_size=2048)
-    vad = SileroVAD(sample_rate=16000, frame_duration_ms=128, energy_threshold=0.25, voice_frames=1, silence_frames=5)
+    vad = SileroVAD(sample_rate=16000, frame_duration_ms=128, energy_threshold=0.5, voice_frames=1, silence_frames=5)
     session_id = getattr(chatbot, "session_id", "")
 
     # 1. 获取问候文本（稍后在 ready 消息中发送）

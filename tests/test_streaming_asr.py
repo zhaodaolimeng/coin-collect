@@ -188,8 +188,8 @@ class TestStreamingASR:
         assert result == ""
 
     @pytest.mark.asyncio
-    async def test_mark_final_waits_for_in_flight(self):
-        """mark_final 在任务飞行中调用时等待完成"""
+    async def test_mark_final_immediate_when_in_flight(self):
+        """mark_final 在任务飞行中时立即返回已有结果，不等待"""
         backend = FakeStreamingBackend(["hasil akhir"])
         s = StreamingASR(backend)
 
@@ -198,8 +198,10 @@ class TestStreamingASR:
         # 立即 mark_final，不等待 submit 完成
         s.mark_final()
 
-        result = await s.wait_for_final(timeout=2.0)
-        assert result == "hasil akhir"
+        # 新行为：立即返回已有文本（为空），不等待飞行中任务
+        assert s.has_final_result
+        result = await s.wait_for_final(timeout=0.1)
+        assert result == ""  # 飞行中任务被丢弃，调用方回退全段 ASR
 
     @pytest.mark.asyncio
     async def test_reset_clears_state(self):

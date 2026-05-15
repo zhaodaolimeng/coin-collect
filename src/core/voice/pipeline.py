@@ -398,12 +398,11 @@ class DuplexCallPipeline:
             return
 
         result = await asyncio.to_thread(self._vad.process_frame, chunk)
-        energy = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
 
-        # 逐帧调试：记录高能量帧及每 20 帧汇总，排查 VAD 不触发原因
+        # 逐帧调试：每 20 帧或前 5 帧输出，排查 VAD 不触发原因
         self._listen_step_count = getattr(self, '_listen_step_count', 0) + 1
-        if energy > 0.0008 or self._listen_step_count <= 5 or self._listen_step_count % 20 == 0:
-            self._debug(f"[LISTEN] step#{self._listen_step_count} energy={energy:.5f} "
+        if self._listen_step_count <= 5 or self._listen_step_count % 20 == 0:
+            self._debug(f"[LISTEN] step#{self._listen_step_count} "
                         f"vad_state={result.state.value} speech_prob={result.confidence:.3f} "
                         f"voice_det={self._voice_detected} speech_pos={self._speech_pos}")
 
@@ -411,13 +410,12 @@ class DuplexCallPipeline:
         if not self._voice_detected:
             self._pre_buffer.append(chunk.copy())
 
-        # 双门 VAD：speech_prob > threshold 且 RMS energy > floor
-        # 背景噪声 speech_prob 可达 0.1-0.4 但 energy < 0.001，需滤除
-        is_true_voice = result.state == VADState.VOICE and energy > 0.001
+        # VAD 由 SileroVAD 神经网络判断，不叠加能量阈值
+        is_true_voice = result.state == VADState.VOICE
 
         if is_true_voice:
             if not self._voice_detected:
-                self._debug(f"[VAD] 检测到语音 energy={energy:.4f} threshold={getattr(self._vad, 'energy_threshold', '?')}")
+                self._debug(f"[VAD] 检测到语音 prob={result.confidence:.3f} threshold={getattr(self._vad, 'energy_threshold', '?')}")
                 # 将前置缓冲内容复制到语音缓冲区开头
                 prepended = 0
                 for old_chunk in self._pre_buffer:
@@ -513,6 +511,18 @@ class DuplexCallPipeline:
         speech = self._speech_buffer[:self._speech_pos].copy()
         speech_dur = len(speech) / self._config.sample_rate
         self._debug(f"[PROCESS] 开始处理语音段: {len(speech)}样本({speech_dur:.1f}s)")
+
+        # VAD 裁剪：利用 SileroVAD 逐帧概率精确定位语音边界，去除噪声
+        if len(speech) > 0 and hasattr(self._vad, 'find_speech_segments'):
+            segments = self._vad.find_speech_segments(speech)
+            if segments:
+                speech = np.concatenate([speech[s:e] for s, e in segments])
+                trimmed_dur = len(speech) / self._config.sample_rate
+                self._debug(f"[PROCESS] VAD裁剪: {speech_dur:.1f}s→{trimmed_dur:.1f}s ({len(segments)}段)")
+            else:
+                self._debug(f"[PROCESS] VAD裁剪: 未检测到语音段，跳过ASR")
+                speech = np.array([], dtype=np.float32)
+
         self._reset_listen_state()
 
         # ASR — 优先使用流式结果，否则全段转写
@@ -545,7 +555,7 @@ class DuplexCallPipeline:
                 self._save_asr_audio(speech, asr_text)
                 self._debug(f"[ASR] 置信度={confidence:.3f} text='{asr_text[:60]}'")
                 # 过滤: 低置信度结果（模型幻觉，"emm"→"Terima kasih"）
-                if confidence < 0.3:
+                if confidence < 0.2:
                     self._debug(f"[ASR] 低置信度({confidence:.3f})，跳过本轮")
                     asr_text = ""
                 # 过滤: 回声检测（ASR 结果匹配近期 Agent 回复文本）
@@ -753,14 +763,17 @@ class DuplexCallPipeline:
     def _is_potential_echo(self, asr_text: str) -> bool:
         """检测 ASR 结果是否为最近 Agent TTS 的回声。
 
-        将 ASR 结果与最近 5 条 Agent 回复比较，忽略大小写和首尾空白。
+        将 ASR 结果与最近 5 条 Agent 回复比较，忽略大小写、首尾空白和标点符号。
         若匹配，说明用户端麦克风捕获的是喇叭播放的 TTS 回声而非真实语音。
         """
-        normalized = asr_text.strip().lower()
+        import string
+        trans = str.maketrans('', '', string.punctuation)
+        normalized = asr_text.strip().lower().translate(trans)
         if len(normalized) < 3:
             return False
         for recent in self._recent_agent_texts:
-            if normalized == recent.strip().lower():
+            recent_normalized = recent.strip().lower().translate(trans)
+            if len(recent_normalized) >= 3 and normalized == recent_normalized:
                 return True
         return False
 

@@ -75,13 +75,16 @@ class StreamingASR:
         asyncio.create_task(self._run_transcribe(audio.copy(), gen))
 
     def mark_final(self) -> None:
-        """标记最终提交，忽略后续 submit()。"""
+        """标记最终提交，忽略后续 submit()。立即返回已有结果，取消旧飞行中任务。"""
         self._is_final = True
-        if self._in_flight_count == 0 and self._active:
-            self._final_text = self._last_full_text
-            self._final_ready.set()
         if not self._active:
             self._final_ready.set()
+            return
+        # 递增 generation 使所有飞行中增长窗口任务失效
+        # 它们仍会完成但结果被丢弃，避免占用 executor 导致管线等待
+        self._generation += 1
+        self._final_text = self._last_full_text
+        self._final_ready.set()
 
     async def wait_for_final(self, timeout: float = 5.0) -> str:
         """等待最终 ASR 结果。"""

@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import tempfile
+import wave
 from unittest import mock
 
 import numpy as np
@@ -361,3 +362,165 @@ async def test_tts_failure_not_fatal():
             break
         await pipeline.step()
     # 不应崩溃
+
+
+# ═══════════════════════════════════════════════════════════════════
+# _is_potential_echo 单元测试
+# ═══════════════════════════════════════════════════════════════════
+
+def _make_pipeline_for_echo():
+    """构造最小 pipeline 用于测试回声检测"""
+    from core.voice.vad import SimpleEnergyVAD
+    p = DuplexCallPipeline(
+        FakeBot(), SilentSource(),
+        DuplexAudioOutput(SilentSource(), barge_in_threshold=0.99),
+        None, None,
+        SimpleEnergyVAD(sample_rate=16000),
+        config=PipelineConfig(),
+    )
+    return p
+
+
+class TestEchoDetection:
+    def test_exact_match(self):
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.append("Terima kasih.")
+        assert p._is_potential_echo("Terima kasih.") is True
+
+    def test_punctuation_insensitive(self):
+        """ASR 不带标点，Agent 带标点 → 仍应匹配"""
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.append("Terima kasih.")
+        assert p._is_potential_echo("Terima kasih") is True
+
+    def test_agent_no_punctuation_asr_with(self):
+        """Agent 不带标点，ASR 带标点 → 仍应匹配"""
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.append("Terima kasih")
+        assert p._is_potential_echo("Terima kasih.") is True
+
+    def test_case_insensitive(self):
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.append("Terima Kasih.")
+        assert p._is_potential_echo("terima kasih") is True
+
+    def test_whitespace_insensitive(self):
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.append("  Terima kasih.  ")
+        assert p._is_potential_echo("  terima kasih  ") is True
+
+    def test_different_text_no_match(self):
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.append("Terima kasih.")
+        assert p._is_potential_echo("Halo apa kabar") is False
+
+    def test_short_text_ignored(self):
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.append("Ya")
+        assert p._is_potential_echo("Ya") is False  # len < 3
+
+    def test_matches_any_recent(self):
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.extend(["Halo.", "Baik.", "Terima kasih."])
+        assert p._is_potential_echo("Terima kasih") is True
+
+    def test_short_recent_skipped(self):
+        """recent 列表中过短的文本被跳过，但不影响匹配其他文本"""
+        p = _make_pipeline_for_echo()
+        p._recent_agent_texts.extend(["Ok", "Terima kasih."])
+        assert p._is_potential_echo("Terima kasih") is True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SileroVAD.find_speech_segments 测试
+# ═══════════════════════════════════════════════════════════════════
+
+try:
+    from core.voice.vad import SileroVAD as _SileroVAD
+    _vad_instance = _SileroVAD(sample_rate=16000)
+    _VAD_AVAILABLE = _vad_instance.is_loaded
+except Exception:
+    _VAD_AVAILABLE = False
+
+
+def _load_tts_wav(name: str) -> np.ndarray:
+    """加载 TTS 测试音频 fixture"""
+    path = Path(__file__).resolve().parent / "fixtures" / f"tts_{name}.wav"
+    if not path.exists():
+        pytest.skip(f"TTS fixture not found: {path}")
+    with wave.open(str(path), 'rb') as wf:
+        n = wf.getnframes()
+        return np.frombuffer(wf.readframes(n), dtype=np.int16).astype(np.float32) / 32767.0
+
+
+@pytest.mark.skipif(not _VAD_AVAILABLE, reason="SileroVAD model not available")
+class TestFindSpeechSegments:
+    def test_silence_returns_empty(self):
+        from core.voice.vad import SileroVAD
+        vad = SileroVAD(sample_rate=16000)
+        audio = np.zeros(16000, dtype=np.float32)
+        segments = vad.find_speech_segments(audio)
+        assert segments == []
+
+    def test_tts_ya_detected(self):
+        """TTS 生成的 \"Ya\" 应被检测为语音"""
+        from core.voice.vad import SileroVAD
+        vad = SileroVAD(sample_rate=16000)
+        audio = _load_tts_wav("ya")
+        segments = vad.find_speech_segments(audio)
+        assert len(segments) >= 1, f"Expected at least 1 segment, got {len(segments)}"
+        total_s = sum(e - s for s, e in segments) / 16000
+        assert 0.2 < total_s < len(audio) / 16000  # 语音段时长合理
+
+    def test_tts_halo_detected(self):
+        """TTS 生成的 \"Halo apa kabar\" 应被检测"""
+        from core.voice.vad import SileroVAD
+        vad = SileroVAD(sample_rate=16000)
+        audio = _load_tts_wav("halo")
+        segments = vad.find_speech_segments(audio)
+        assert len(segments) >= 1
+
+    def test_tts_terima_kasih_detected(self):
+        """TTS 生成的 \"Terima kasih\" 应被检测"""
+        from core.voice.vad import SileroVAD
+        vad = SileroVAD(sample_rate=16000)
+        audio = _load_tts_wav("terima_kasih")
+        segments = vad.find_speech_segments(audio)
+        assert len(segments) >= 1
+
+    def test_trimming_reduces_length(self):
+        """裁剪后音频应缩短（去除前后静音）"""
+        from core.voice.vad import SileroVAD
+        vad = SileroVAD(sample_rate=16000)
+        audio = _load_tts_wav("terima_kasih")
+        segments = vad.find_speech_segments(audio)
+        assert len(segments) == 1
+        trimmed_len = sum(e - s for s, e in segments)
+        assert trimmed_len < len(audio) * 0.9  # 至少减少 10%
+
+    def test_two_utterances_split_by_long_gap(self):
+        """两段语音中间间隔 > 300ms → 应切分为两段"""
+        from core.voice.vad import SileroVAD
+        vad = SileroVAD(sample_rate=16000)
+        sr = 16000
+        ya = _load_tts_wav("ya")
+        tk = _load_tts_wav("terima_kasih")
+        # ya + 500ms silence + terima kasih
+        gap = int(0.5 * sr)
+        audio = np.concatenate([ya, np.zeros(gap, dtype=np.float32), tk])
+        segments = vad.find_speech_segments(audio)
+        assert len(segments) == 2, f"Expected 2 segments, got {len(segments)}"
+
+    def test_very_short_burst_discarded(self):
+        """语音 < 400ms → 应被丢弃"""
+        from core.voice.vad import SileroVAD
+        vad = SileroVAD(sample_rate=16000)
+        sr = 16000
+        # 从 \"ya\" 中截取 300ms（取中间高能量段）
+        ya = _load_tts_wav("ya")
+        start = int(0.3 * sr)
+        burst = ya[start:start + int(0.3 * sr)]  # 300ms < 400ms min_speech_ms
+        audio = np.zeros(sr, dtype=np.float32)
+        audio[int(0.35 * sr):int(0.35 * sr) + len(burst)] = burst
+        segments = vad.find_speech_segments(audio)
+        assert segments == [], f"Expected 0 segments for 300ms burst, got {len(segments)}"
