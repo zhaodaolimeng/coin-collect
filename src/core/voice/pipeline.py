@@ -101,6 +101,12 @@ class InterruptionContext:
 class DuplexCallPipeline:
     """双工通话管线。统一人声模式与自动仿真模式的语音催收核心循环。
 
+    状态机流转:
+        IDLE → LISTENING ⇄ PROCESSING → RESPONDING ⇄ LISTENING (循环)
+        LISTENING → CLOSING → CLOSED (长静音超时)
+        RESPONDING → INTERRUPTED → LISTENING (用户打断)
+        PROCESSING → CLOSING → CLOSED (Bot 结束)
+
     使用:
         source = MicrophoneSource()
         output = DuplexAudioOutput(source)
@@ -111,6 +117,13 @@ class DuplexCallPipeline:
             if result:
                 print(f"[{result.state_to.name}] ASR: {result.asr_text}")
         await pipeline.stop()
+
+    关键设计决策:
+        - 静音超时使用 wall-clock 时间（非音频帧计数），避免空轮询误差积累
+        - 流式 ASR 使用"增长窗口 + 单词级公共前缀去重"模拟实时转写
+        - 完整 ASR 使用 temperature=[0.0] 禁用温度回退（P16-03），单次 beam search
+        - 打断后不保留近期音频（flush keep_recent_s=0.0），避免 TTS 残响误识别
+        - 播放结束后 300ms 冷却期：丢弃麦克风音频，避免喇叭回声触发 VAD
     """
 
     def __init__(
@@ -370,7 +383,15 @@ class DuplexCallPipeline:
     # ── 状态处理 ──────────────────────────────────────────
 
     async def _step_listen(self):
-        """LISTENING: 读取一个音频块，VAD 检测，累积语音段"""
+        """LISTENING: 读取一个音频块，VAD 检测，累积语音段。
+
+        静音超时使用 wall-clock 时间（非音频帧计数），原因：
+        WebSocket 源在用户静音时 queue 为空（chunk=None），若用帧计数计时
+        会停滞，导致实际 2s 静音的墙钟耗时 10s+ 才触发超时。
+        因此同时检查两条路径：
+        1. chunk=None 路径（queue 空）：wall-clock 超时检查
+        2. chunk 有数据路径：VAD 判定 SILENCE 后启动 wall-clock 计时
+        """
         chunk = await self._source.read_chunk()
 
         # None = 暂无数据（WebSocket queue 为空），不是真正的静音
@@ -504,12 +525,16 @@ class DuplexCallPipeline:
         self._asr_wait_retries = 0
 
         # 等待流式 ASR 最终结果（如有），必须在 _reset_listen_state 之前保存
+        # mark_final() 立即设置 _final_ready，因此 is_final_pending 通常为 False
+        # 仅在 submit() 被调用但 mark_final() 尚未调用时才会等待
         streaming_text: str = ""
         if self._streaming_asr is not None and self._streaming_asr.is_active:
             if self._streaming_asr.is_final_pending:
                 if not self._streaming_asr.has_final_result:
                     return  # 等待流式 ASR 完成，下次 step 重试
             streaming_text = self._streaming_asr.final_text or ""
+        # 注意: 增长窗口 ASR 若全部 log prob 不达标，final_text 为空，
+        # 管线正确回退到下方的完整 ASR 路径（transcribe_with_confidence）
 
         speech = self._speech_buffer[:self._speech_pos].copy()
         speech_dur = len(speech) / self._config.sample_rate
@@ -528,7 +553,10 @@ class DuplexCallPipeline:
 
         self._reset_listen_state()
 
-        # ASR — 优先使用流式结果，否则全段转写
+        # ASR 决策树（优先级从上到下）:
+        # 1. 流式 partial 结果可用 → 直接使用（需 ASCII 校验）
+        # 2. 流式无结果但 speech 非空 → 完整 ASR (transcribe_with_confidence, temperature=[0.0])
+        # 3. speech 为空 → 跳过
         asr_text = ""
         if streaming_text:
             # 安全校验：非 ASCII 字符说明 ASR 出错 → 回退全段转写
@@ -557,7 +585,9 @@ class DuplexCallPipeline:
             if asr_text:
                 self._save_asr_audio(speech, asr_text)
                 self._debug(f"[ASR] 置信度={confidence:.3f} text='{asr_text[:60]}'")
-                # 过滤: 低置信度结果（模型幻觉，"emm"→"Terima kasih"）
+                # 过滤: 低置信度结果（模型幻觉，如 "besok"→"Terima kasih kerana menonton."）
+                # 阈值 0.2 偏低，已知幻觉置信度在 0.34-0.48 范围，当前阈值无法过滤
+                # 提升阈值到 0.5 可能过滤幻觉，但也会误杀部分合法低置信度结果
                 if confidence < 0.2:
                     self._debug(f"[ASR] 低置信度({confidence:.3f})，跳过本轮")
                     asr_text = ""
@@ -736,7 +766,16 @@ class DuplexCallPipeline:
     # ── 流式 ASR 方法 ─────────────────────────────────────
 
     def _maybe_submit_streaming_asr(self):
-        """语音活跃时周期性提交增长窗口音频快照给流式 ASR"""
+        """语音活跃时周期性提交增长窗口音频快照给流式 ASR。
+
+        节流条件（同时满足）:
+        - 累积音频 >= min_audio_duration (0.5s)
+        - 距上次提交 >= throttle_interval (0.5s)
+        - 新增音频 >= min_new_audio (0.3s)
+
+        每次提交完整累积音频（非增量），由 StreamingASR 内部做 generation
+        去重和单词级公共前缀匹配提取增量文本。
+        """
         if self._streaming_asr is None:
             return
         min_samples = int(self._streaming_config.min_audio_duration * self._config.sample_rate)

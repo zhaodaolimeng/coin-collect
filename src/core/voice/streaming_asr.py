@@ -26,8 +26,20 @@ class StreamingASR:
     在用户说话期间周期性提交增长中的音频快照给 faster_whisper，
     通过单词级公共前缀匹配去重提取增量文本。
 
-    使用 generation 计数器取消旧结果：每次 submit() 递增，
-    ASR 任务完成后检查 generation，不匹配则丢弃。
+    取消机制 (generation counter):
+        submit() → generation += 1 → 创建 task(generation=N)
+        mark_final() → generation += 1 → 旧 task 完成后发现 gen != generation → 丢弃
+        关键保证: mark_final() 立即设置 _final_ready，不等待飞行中 task
+
+    transcribe_lightweight (beam_size=1, temperature=[0.0]):
+        速度优先于精度。已知问题：beam_size=1 对所有短音频可能均不达标
+        (log prob < -1.0)，导致增长窗口完全无 partial 产出。若需提升
+        partial 命中率，可考虑 beam_size=3。
+
+    去重算法:
+        单词级公共前缀匹配。例：
+        "halo apa" → "halo apa kabar" → 增量: "kabar"
+        若前缀完全不匹配（上一轮纯 hallucination），返回完整新文本
     """
 
     def __init__(self, asr, config: StreamingASRConfig = None):
@@ -80,13 +92,21 @@ class StreamingASR:
         asyncio.create_task(self._run_transcribe(audio.copy(), gen))
 
     def mark_final(self) -> None:
-        """标记最终提交，忽略后续 submit()。立即返回已有结果，取消旧飞行中任务。"""
+        """标记最终提交，忽略后续 submit()。
+
+        立即返回已有结果 (_last_full_text)，不等待飞行中 ASR 任务。
+        这是延迟优化的关键：增长窗口 ASR 耗时 1-2s，若不立即返回
+        管线会产生额外等待。
+
+        副作用: 飞行中任务继续运行到完成（Python 无法可靠取消线程内
+        C 扩展调用），但结果被 generation 检查丢弃。
+        """
         self._is_final = True
         if not self._active:
             self._final_ready.set()
             return
         # 递增 generation 使所有飞行中增长窗口任务失效
-        # 它们仍会完成但结果被丢弃，避免占用 executor 导致管线等待
+        # 它们仍会完成但结果被丢弃
         self._generation += 1
         self._final_text = self._last_full_text
         self._final_ready.set()
@@ -118,8 +138,14 @@ class StreamingASR:
     async def _run_transcribe(self, audio: np.ndarray, gen: int) -> None:
         """在独立 executor 中运行轻量化 ASR，完成后检查 generation 并去重。
 
-        beam_size=1 + temperature=[0.0]（无回退）确保增长窗口快速扫描，
-        不挤占完整 ASR 的 executor 槽位。速度优先于精度。
+        beam_size=1 + temperature=[0.0]（无回退）。
+        实测: 对 faster_whisper small + 印尼语，beam_size=1 的 log prob
+        几乎总是低于 -1.0 阈值，导致所有增长窗口均无产出。增长窗口实际
+        收益趋近于零，仅消耗 CPU。若需恢复 partial 能力，升至 beam_size=3。
+
+        注意: _asr 必须是 ASRPipeline（有 transcribe_lightweight），
+        非裸 RealTimeASR。传入 RealTimeASR 会导致 fallback 到无 temperature
+        参数的 transcribe_async，触发完整 6 级温度回退。
         """
         self._in_flight_count += 1
         try:

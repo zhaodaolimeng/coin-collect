@@ -53,6 +53,9 @@ class RealTimeASR:
         self.beam_size = beam_size
         self.sample_rate = sample_rate
         self._model = None
+        # max_workers=2: 允许完整 ASR 和 ASR 文件转写并发。
+        # 注意: 增长窗口 ASR (StreamingASR) 使用自己的独立 executor (max_workers=1)，
+        # 不与本 executor 竞争。P16-01
         self._executor = ThreadPoolExecutor(max_workers=2)
 
     @classmethod
@@ -150,7 +153,13 @@ class RealTimeASR:
         temperature: list[float] | None = None,
     ) -> ASRResult:
         """
-        从numpy数组转写（流式模式）
+        从numpy数组转写（流式模式）。
+
+        temperature 参数对延迟的影响:
+            None → faster_whisper 默认 [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+                   噪声帧上逐级回退，6x CPU 开销，单次最长 15s+
+            [0.0] → 单次 beam search，无回退，延迟 2-3s
+            P16-03：所有管线路径统一使用 [0.0]
 
         Args:
             audio: float32 array, shape (n_samples,), 16kHz
@@ -239,7 +248,12 @@ class RealTimeASR:
 class ASRPipeline:
     """
     ASR处理管线：识别 → 纠错 → 输出
-    串联RealTimeASR与ASRCorrector
+    串联 RealTimeASR 与 ASRCorrector。
+
+    关键: transcribe_lightweight 定义在此类（非 RealTimeASR）。
+    StreamingASR 必须持有 ASRPipeline 引用才能访问该方法。
+    若传入裸 RealTimeASR，getattr('transcribe_lightweight') 返回 None，
+    回退到无 temperature 参数的 transcribe_async，触发完整温度回退 (P16-03 bug)。
     """
 
     def __init__(self, model_size: str = "small", corrector=None):
