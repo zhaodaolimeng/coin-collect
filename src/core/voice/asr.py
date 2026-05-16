@@ -182,6 +182,9 @@ class RealTimeASR:
             )
             if temperature is not None:
                 kwargs["temperature"] = temperature
+            logger.debug(f"ASR transcribe_array: beam_size={kwargs['beam_size']}, "
+                         f"temperature={kwargs.get('temperature', 'default')}, "
+                         f"audio_len={len(audio)}")
             segments, info = self._model.transcribe(audio, **kwargs)
             text_parts = []
             confidence_sum = 0.0
@@ -215,8 +218,9 @@ class RealTimeASR:
     async def transcribe_async(self, audio: np.ndarray, **kwargs) -> ASRResult:
         """异步转写，避免阻塞事件循环。kwargs 透传至 transcribe_array"""
         loop = asyncio.get_event_loop()
+        # 默认参数在定义时求值，避免 lambda 闭包延迟绑定导致 kwargs 丢失
         return await loop.run_in_executor(
-            self._executor, lambda a: self.transcribe_array(a, **kwargs), audio)
+            self._executor, lambda a, _kw=kwargs: self.transcribe_array(a, **_kw), audio)
 
     def _is_silence(self, audio: np.ndarray, threshold: float = 0.005) -> bool:
         """检查音频片段是否为静音"""

@@ -300,7 +300,8 @@ class DuplexCallPipeline:
                     self._streaming_asr.on_partial_result = self._on_streaming_partial
                     self._debug("[流式ASR] 已启用 sherpa-onnx 原生流式转写")
                 else:
-                    self._streaming_asr = StreamingASR(asr_engine, self._streaming_config)
+                    # 传入 ASRPipeline（非裸 RealTimeASR），使 transcribe_lightweight 可访问
+                    self._streaming_asr = StreamingASR(self._asr, self._streaming_config)
                     self._streaming_asr.on_partial_result = self._on_streaming_partial
                     self._debug("[流式ASR] 已启用增长窗口流式转写")
             else:

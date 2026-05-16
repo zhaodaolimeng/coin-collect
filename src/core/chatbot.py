@@ -350,6 +350,10 @@ class ASRCorrector:
         "wang": "uang",
         "wangnya": "uangnya",
         "buktifnya": "buktinya",
+        # faster_whisper small 模型对 "besok" 的常见误识别
+        "bisok": "besok",
+        "pisok": "besok",
+        "disok": "besok",
     }
 
     @classmethod
