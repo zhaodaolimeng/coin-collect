@@ -116,19 +116,19 @@ class StreamingASR:
     # ── 内部 ──────────────────────────────────────────────
 
     async def _run_transcribe(self, audio: np.ndarray, gen: int) -> None:
-        """在独立 executor 中运行 ASR，完成后检查 generation 并去重。
+        """在独立 executor 中运行轻量化 ASR，完成后检查 generation 并去重。
 
-        使用 ThreadPoolExecutor(max_workers=1) 确保增长窗口任务
-        不占用完整 ASR 的 executor 槽位，消除资源竞争。
+        beam_size=1 + temperature=[0.0]（无回退）确保增长窗口快速扫描，
+        不挤占完整 ASR 的 executor 槽位。速度优先于精度。
         """
         self._in_flight_count += 1
         try:
             loop = asyncio.get_event_loop()
-            # 优先使用同步 transcribe 方法（ASRPipeline），走独立 executor
-            transcribe_fn = getattr(self._asr, 'transcribe', None)
-            if transcribe_fn is not None:
+            # 优先使用轻量化同步方法（beam_size=1, 无temperature回退）
+            light_fn = getattr(self._asr, 'transcribe_lightweight', None)
+            if light_fn is not None:
                 full_text = await loop.run_in_executor(
-                    self._executor, transcribe_fn, audio)
+                    self._executor, light_fn, audio)
             else:
                 # 回退：FakeStreamingBackend 等测试后端
                 full_text = await self._asr.transcribe_async(audio)

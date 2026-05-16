@@ -144,12 +144,19 @@ class RealTimeASR:
                 error_message=str(e),
             )
 
-    def transcribe_array(self, audio: np.ndarray) -> ASRResult:
+    def transcribe_array(
+        self, audio: np.ndarray,
+        beam_size: int = None,
+        temperature: list[float] | None = None,
+    ) -> ASRResult:
         """
         从numpy数组转写（流式模式）
 
         Args:
             audio: float32 array, shape (n_samples,), 16kHz
+            beam_size: 覆盖默认 beam_size（None=使用实例默认值）
+            temperature: 温度列表（None=faster_whisper 默认，
+                         [0.0]=单次 beam search 无回退）
 
         Returns:
             ASRResult
@@ -167,13 +174,15 @@ class RealTimeASR:
         start = time.time()
         try:
             audio = audio.astype(np.float32)
-            segments, info = self._model.transcribe(
-                audio,
+            kwargs = dict(
                 language=self.language,
-                beam_size=self.beam_size,
+                beam_size=beam_size if beam_size is not None else self.beam_size,
                 word_timestamps=False,
                 vad_filter=True,
             )
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            segments, info = self._model.transcribe(audio, **kwargs)
             text_parts = []
             confidence_sum = 0.0
             segment_count = 0
@@ -203,10 +212,11 @@ class RealTimeASR:
                 error_message=str(e),
             )
 
-    async def transcribe_async(self, audio: np.ndarray) -> ASRResult:
-        """异步转写，避免阻塞事件循环"""
+    async def transcribe_async(self, audio: np.ndarray, **kwargs) -> ASRResult:
+        """异步转写，避免阻塞事件循环。kwargs 透传至 transcribe_array"""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self.transcribe_array, audio)
+        return await loop.run_in_executor(
+            self._executor, lambda a: self.transcribe_array(a, **kwargs), audio)
 
     def _is_silence(self, audio: np.ndarray, threshold: float = 0.005) -> bool:
         """检查音频片段是否为静音"""
@@ -264,14 +274,31 @@ class ASRPipeline:
             text = self.corrector.correct(text)
         return text.strip()
 
+    def transcribe_lightweight(self, audio: np.ndarray) -> str:
+        """轻量化转写：beam_size=1 + 单次 beam search（无 temperature 回退）。
+
+        用于增长窗口快速扫描，速度优先于精度。
+        """
+        result = self.asr.transcribe_array(audio, beam_size=1, temperature=[0.0])
+        if not result.success:
+            return ""
+        text = result.text
+        if self.corrector:
+            text = self.corrector.correct(text)
+        return text.strip()
+
     async def transcribe_async(self, audio: np.ndarray) -> str:
         """异步版本（保留向后兼容，返回纯文本）"""
         text, _ = await self.transcribe_with_confidence(audio)
         return text
 
     async def transcribe_with_confidence(self, audio: np.ndarray) -> tuple[str, float]:
-        """异步转写，返回 (文本, 置信度)，用于管线过滤"""
-        result = await self.asr.transcribe_async(audio)
+        """异步转写，返回 (文本, 置信度)，用于管线过滤。
+
+        使用 temperature=[0.0] 禁用回退循环，消除噪声帧上的 6x 重试开销。
+        beam_size=5 的 beam search 已提供足够精度。
+        """
+        result = await self.asr.transcribe_async(audio, temperature=[0.0])
         if not result.success:
             return "", 0.0
 
