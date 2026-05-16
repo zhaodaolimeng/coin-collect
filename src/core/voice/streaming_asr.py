@@ -3,6 +3,7 @@
 """流式 ASR — 增长窗口 + 结果去重，模拟实时转写"""
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, Callable
 
@@ -30,11 +31,11 @@ class StreamingASR:
     """
 
     def __init__(self, asr, config: StreamingASRConfig = None):
-        self._asr = asr                  # RealTimeASR 实例
+        self._asr = asr                  # ASRPipeline 实例
         self._config = config or StreamingASRConfig()
 
         self._generation: int = 0        # 递增取消计数器
-        self._in_flight_count: int = 0   # 并发 ASR 任务计数 (max_workers=2)
+        self._in_flight_count: int = 0   # 并发 ASR 任务计数
         self._last_full_text: str = ""   # 最近完整转写结果
         self._is_final: bool = False     # mark_final() 已调用
         self._final_text: str = ""       # 最终结果缓存
@@ -42,6 +43,10 @@ class StreamingASR:
         self._active: bool = False       # submit() 已调用但未完成
         self._sample_rate: int = getattr(asr, 'sample_rate', 16000)
         self._lock = asyncio.Lock()
+
+        # 增长窗口 ASR 使用独立 executor，避免与完整 ASR 竞争
+        # max_workers=1 确保最多一个增长窗口任务运行
+        self._executor = ThreadPoolExecutor(max_workers=1)
 
         self.on_partial_result: Optional[Callable[[str], None]] = None
 
@@ -104,13 +109,29 @@ class StreamingASR:
         self._final_ready.clear()
         self._active = False
 
+    def shutdown(self) -> None:
+        """释放 executor 资源。"""
+        self._executor.shutdown(wait=False)
+
     # ── 内部 ──────────────────────────────────────────────
 
     async def _run_transcribe(self, audio: np.ndarray, gen: int) -> None:
-        """在 executor 中运行 ASR，完成后检查 generation 并去重。"""
+        """在独立 executor 中运行 ASR，完成后检查 generation 并去重。
+
+        使用 ThreadPoolExecutor(max_workers=1) 确保增长窗口任务
+        不占用完整 ASR 的 executor 槽位，消除资源竞争。
+        """
         self._in_flight_count += 1
         try:
-            full_text = await self._asr.transcribe_async(audio)
+            loop = asyncio.get_event_loop()
+            # 优先使用同步 transcribe 方法（ASRPipeline），走独立 executor
+            transcribe_fn = getattr(self._asr, 'transcribe', None)
+            if transcribe_fn is not None:
+                full_text = await loop.run_in_executor(
+                    self._executor, transcribe_fn, audio)
+            else:
+                # 回退：FakeStreamingBackend 等测试后端
+                full_text = await self._asr.transcribe_async(audio)
             if not isinstance(full_text, str):
                 full_text = ""
         except Exception as e:

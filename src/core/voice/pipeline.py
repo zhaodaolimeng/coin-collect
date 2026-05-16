@@ -317,6 +317,8 @@ class DuplexCallPipeline:
             self._speak_task.cancel()
         self._output.stop()
         await self._source.stop()
+        if self._streaming_asr is not None:
+            self._streaming_asr.shutdown()
         self._set_state(PipelineState.CLOSED)
         logger.info("DuplexCallPipeline stopped")
 

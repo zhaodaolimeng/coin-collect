@@ -209,7 +209,7 @@
 
 | 子模块 | 事项ID | 具体内容 | 前置依赖 | 状态 |
 |--------|--------|----------|----------|------|
-| **ASR 资源隔离** | P16-01 | 增长窗口 ASR 使用独立 `ThreadPoolExecutor(max_workers=1)`，完整 ASR 独占另一个 executor，避免资源竞争 | 语音链路打通 | 📝 待开始 |
+| **ASR 资源隔离** | P16-01 | 增长窗口 ASR 使用独立 `ThreadPoolExecutor(max_workers=1)`，完整 ASR 独占另一个 executor，避免资源竞争 | 语音链路打通 | ✅ 已完成 |
 | | P16-02 | 增长窗口 ASR 轻量化：`beam_size=1`、关闭 temperature fallback，只做快速扫描（精度不重要，用于部分结果展示） | P16-01 完成 | 📝 待开始 |
 | **噪声早停** | P16-03 | temperature 重试早停：`avg_logprob < -1.0` 时大概率是噪声帧，提前中止 temperature 回退循环，避免浪费计算 | 语音链路打通 | 📝 待开始 |
 | **executor 扩容** | P16-04 | 评估将 ASR executor `max_workers` 从 2 提升到 3-4，测量时延改善与 CPU/内存代价 | P16-01 完成 | 📝 待开始 |
