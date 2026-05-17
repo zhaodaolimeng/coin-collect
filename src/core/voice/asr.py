@@ -26,6 +26,7 @@ class ASRResult:
     duration: float = 0.0
     success: bool = True
     error_message: Optional[str] = None
+    pseudo_perplexity: Optional[float] = None  # ASRConfidenceGate 评分
 
 
 class RealTimeASR:

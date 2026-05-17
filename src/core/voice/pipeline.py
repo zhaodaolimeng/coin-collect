@@ -15,6 +15,7 @@ import numpy as np
 from core.voice.audio_source import AudioSource
 from core.voice.audio_output import DuplexAudioOutput, PlaybackResult
 from core.voice.streaming_asr import StreamingASR, StreamingASRConfig
+from core.voice.asr_confidence import ASRConfidenceGate
 from core.voice.vad import SimpleEnergyVAD, VADState
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,9 @@ class DuplexCallPipeline:
         self._last_asr_submit_time: float = 0.0
         self._last_asr_submit_pos: int = 0
 
+        # ASR 置信度门 — IndoBERT 伪困惑度过滤，拦截疑似幻觉
+        self._asr_confidence_gate: ASRConfidenceGate | None = None
+
         # 当前轮次的 Agent 输出
         self._current_agent_text = ""
         self._current_agent_audio: np.ndarray | None = None
@@ -322,6 +326,10 @@ class DuplexCallPipeline:
                 self._debug("[流式ASR] ASR引擎不支持流式，回退整段转写")
         else:
             self._streaming_asr = None
+        # 后台加载 ASR 置信度门（IndoBERT ~3s，不阻塞管线启动）
+        if self._asr_confidence_gate is None:
+            self._asr_confidence_gate = ASRConfidenceGate(threshold=5000, device="mps")
+            asyncio.create_task(self._asr_confidence_gate.ensure_loaded())
         self._set_state(PipelineState.LISTENING)
         logger.info("DuplexCallPipeline started")
 
@@ -333,6 +341,8 @@ class DuplexCallPipeline:
         await self._source.stop()
         if self._streaming_asr is not None:
             self._streaming_asr.shutdown()
+        if self._asr_confidence_gate is not None:
+            self._asr_confidence_gate.shutdown()
         self._set_state(PipelineState.CLOSED)
         logger.info("DuplexCallPipeline stopped")
 
@@ -597,6 +607,13 @@ class DuplexCallPipeline:
                     asr_text = ""
 
         self._debug(f"[ASR] 转写结果: '{asr_text}'" if asr_text else "[ASR] 转写结果: (空)")
+
+        # 置信度门: IndoBERT 伪困惑度过滤（在置信度和回声检测之后）
+        if asr_text and self._asr_confidence_gate is not None:
+            quality = await self._asr_confidence_gate.score(asr_text)
+            if not quality.is_accepted:
+                self._debug(f"[ASR-Gate] 拒绝: '{asr_text[:60]}' 困惑度={quality.pseudo_perplexity:.1f}")
+                asr_text = ""
 
         # ASR 结果被过滤或无结果 → 回退 LISTENING
         if not asr_text and speech_dur > 0:
