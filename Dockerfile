@@ -29,7 +29,7 @@ COPY requirements.txt .
 # 2. 其余依赖（grep -v 排除 torch 行）
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir $(grep -v '^torch' requirements.txt)
+    pip install --no-cache-dir $(grep -vE '^(torch|#|$)' requirements.txt)
 
 COPY . .
 
