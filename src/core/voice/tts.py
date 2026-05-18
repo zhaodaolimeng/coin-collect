@@ -5,12 +5,15 @@ TTS引擎抽象层
 支持多种TTS后端：Piper-TTS（本地）、Edge-TTS、Coqui-TTS等
 """
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from dataclasses import dataclass
 import time
 import os
+
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
@@ -91,7 +94,7 @@ class EdgeTTSEngine(TTSEngine):
             self._edge_tts = edge_tts
             self._available = True
         except ImportError:
-            print("警告: edge-tts未安装")
+            logger.warning("edge-tts未安装，TTS将不可用")
 
     async def synthesize(
         self,
@@ -173,9 +176,9 @@ class CoquiTTSEngine(TTSEngine):
             import TTS
             self._tts = TTS
             self._available = True
-            print("Coqui-TTS已加载")
+            logger.info("Coqui-TTS已加载")
         except ImportError:
-            print("提示: Coqui-TTS未安装，使用pip install TTS安装")
+            logger.debug("Coqui-TTS未安装（可选引擎）")
 
     async def synthesize(
         self,
@@ -279,7 +282,7 @@ class PiperTTSEngine(TTSEngine):
             self._piper = piper
             self._available = True
         except ImportError:
-            print("提示: piper-tts未安装，使用 pip install piper-tts 安装")
+            logger.debug("piper-tts未安装（可选引擎）")
 
         # 默认模型路径
         if model_path is None:
