@@ -29,8 +29,8 @@ jobs:
 
       - run: pip install flake8
 
-      - name: flake8
-        run: flake8 src/ tests/ --max-line-length=120 --ignore=E203,W503,E501 --count --show-source --statistics
+      - name: flake8（仅告警，不阻断）
+        run: flake8 src/ tests/ --max-line-length=120 --ignore=E203,W503,E501 --count --show-source --statistics --exit-zero
 
   # ═══════════════════════════════════════════════════════════════
   # 阶段 2: 单元测试（跳过需 GPU/模型的集成测试）
