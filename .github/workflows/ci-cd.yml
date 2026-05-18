@@ -1,4 +1,6 @@
 # CI/CD Pipeline — 印尼智能催收系统
+# CI: lint → test → build(推送到 GHCR)
+# CD: 服务器上 Watchtower 自动拉取新镜像
 name: CI/CD
 
 on:
@@ -7,17 +9,9 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
-    inputs:
-      deploy_to_test:
-        description: '部署到测试服务器'
-        required: true
-        default: 'true'
-        type: choice
-        options: ['true', 'false']
 
 env:
   PYTHON_VERSION: '3.10'
-  APP_DIR: '/home/ecs-user/limeng/coin-collect'
 
 jobs:
   # ═══════════════════════════════════════════════════════════════
@@ -62,7 +56,6 @@ jobs:
 
       - name: 运行测试（跳过需模型的集成测试）
         run: |
-          # 只跑不依赖 GPU/faster_whisper 的测试
           python3 -m pytest tests/ -q --asyncio-mode=auto --tb=short \
             --ignore=tests/test_duplex_integration.py \
             --ignore=tests/test_duplex_pipeline.py \
@@ -72,13 +65,13 @@ jobs:
             -k "not integration"
 
   # ═══════════════════════════════════════════════════════════════
-  # 阶段 3: 构建 Docker 镜像
+  # 阶段 3: 构建 Docker 镜像并推送到 GHCR
   # ═══════════════════════════════════════════════════════════════
   build:
     name: 构建镜像
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/master' || github.event.inputs.deploy_to_test == 'true'
+    if: github.ref == 'refs/heads/master'
     permissions:
       contents: read
       packages: write
@@ -112,60 +105,3 @@ jobs:
             ghcr.io/${{ steps.meta.outputs.repo }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # ═══════════════════════════════════════════════════════════════
-  # 阶段 4: 部署到测试环境
-  # ═══════════════════════════════════════════════════════════════
-  deploy:
-    name: 部署测试环境
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/master' || github.event.inputs.deploy_to_test == 'true'
-    environment:
-      name: test
-    steps:
-      - name: 部署到测试服务器
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.TEST_SERVER_HOST }}
-          username: ${{ secrets.TEST_SERVER_USER }}
-          key: ${{ secrets.TEST_SERVER_SSH_KEY }}
-          port: ${{ secrets.TEST_SERVER_PORT || 22 }}
-          script: |
-            REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-            IMAGE="ghcr.io/${REPO}:latest"
-
-            # 登录 GHCR（公开仓库可跳过，私有仓库需要 GH_PAT 带 read:packages）
-            if [ -n "${{ secrets.GH_PAT }}" ]; then
-              echo "${{ secrets.GH_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-            fi
-
-            echo ">>> 拉取镜像"
-            docker pull $IMAGE
-
-            echo ">>> 停止旧容器"
-            docker stop coin-collect-api 2>/dev/null || true
-            docker rm coin-collect-api 2>/dev/null || true
-
-            echo ">>> 启动新容器"
-            docker run -d \
-              --name coin-collect-api \
-              --restart always \
-              -p 8000:8000 \
-              -e TZ=Asia/Jakarta \
-              -e ENV=test \
-              -e DB_URI=sqlite:///app/data/collection.db \
-              -e LLM_PROVIDER=${LLM_PROVIDER:-mock} \
-              -e OPENAI_API_KEY=${OPENAI_API_KEY:-} \
-              -e LLM_API_KEY=${LLM_API_KEY:-} \
-              -e HF_HOME=/app/.cache/huggingface \
-              -e TRANSFORMERS_CACHE=/app/.cache/huggingface \
-              -v $APP_DIR/data:/app/data \
-              -v $APP_DIR/logs:/app/logs \
-              -v $APP_DIR/cache:/app/.cache/huggingface \
-              $IMAGE
-
-            echo ">>> 等待就绪"
-            sleep 15
-            curl -f http://localhost:8000/health && echo "OK" || echo "HEALTH CHECK FAILED"
-            docker logs --tail 20 coin-collect-api
