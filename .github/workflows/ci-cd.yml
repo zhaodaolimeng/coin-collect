@@ -17,7 +17,7 @@ on:
 
 env:
   PYTHON_VERSION: '3.10'
-  APP_DIR: '/opt/coin-collect'
+  APP_DIR: '/home/ecs-user/limeng/coin-collect'
 
 jobs:
   # ═══════════════════════════════════════════════════════════════
