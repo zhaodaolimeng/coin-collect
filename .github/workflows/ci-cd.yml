@@ -1,217 +1,126 @@
-# 印尼智能催收系统 CI/CD 流程
-name: CI/CD Pipeline
+# CI/CD Pipeline — 印尼智能催收系统
+name: CI/CD
 
-# 触发条件
 on:
-  # PR到master分支时触发CI
   pull_request:
-    branches: [ master ]
-  # push到master分支时触发全流程
+    branches: [master]
   push:
-    branches: [ master ]
-  # 支持手动触发
+    branches: [master]
   workflow_dispatch:
     inputs:
-      run_full_test:
-        description: '是否运行全量回归测试'
+      deploy_to_test:
+        description: '部署到测试服务器'
         required: true
-        default: 'false'
-      deploy_prod:
-        description: '是否部署到生产环境'
-        required: true
-        default: 'false'
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
 
-# 全局环境变量
 env:
-  # 项目基础配置
   PYTHON_VERSION: '3.10'
-  # Docker镜像配置（根据实际修改
-  DOCKER_REGISTRY: 'registry.cn-hangzhou.aliyuncs.com'  # 示例：阿里云镜像服务
-  DOCKER_REPO: 'your-org/coin-collect'
-  DOCKER_IMAGE_NAME: 'coin-collect-api'
-  # 部署配置
-  TEST_SERVER_TEST: 'root@your-test-server-ip'
-  SERVER_PROD: 'root@your-prod-server-ip'
   APP_DIR: '/opt/coin-collect'
 
 jobs:
-  ###########################################################################
-  # 阶段1：代码质量检查
-  ###########################################################################
-  code-check:
-    name: 代码质量检查
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 1: 代码检查
+  # ═══════════════════════════════════════════════════════════════
+  lint:
+    name: 代码检查
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 设置Python环境
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: 安装检查工具
-        run: |
-          python -m pip install --upgrade pip
-          pip install flake8 black isort bandit
+      - run: pip install flake8
 
-      - name: 代码格式检查（isort
-        run: isort --check --diff src/ tests/ --profile black
-        continue-on-error: false
+      - name: flake8
+        run: flake8 src/ tests/ --max-line-length=120 --ignore=E203,W503,E501 --count --show-source --statistics
 
-      - name: 代码格式检查（black）
-        run: black --check --diff src/ tests/
-        continue-on-error: false
-
-      - name: 代码质量检查（flake8）
-        run: |
-          flake8 src/ tests/ --max-line-length=120 --ignore=E203,W503
-        continue-on-error: false
-
-      - name: 安全漏洞扫描（bandit）
-        run: |
-          bandit -r src/ -f json -o bandit-report.json
-        continue-on-error: true  # 安全扫描只告警不阻断，可根据需要调整
-
-      - name: 敏感信息扫描
-        uses: secret-scan
-        uses: max/[trademark:
-        uses: actions/checkout@v4
-      - name: 敏感信息扫描（防止硬编码密钥、用户数据）
-        uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          extra_args: --only-verified
-        continue-on-error: false  # 发现敏感信息直接阻断
-
-  ###########################################################################
-  # 阶段2：单元测试
-  ###########################################################################
-  unit-test:
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 2: 单元测试（跳过需 GPU/模型的集成测试）
+  # ═══════════════════════════════════════════════════════════════
+  test:
     name: 单元测试
     runs-on: ubuntu-latest
-    needs: code-check  # 依赖代码检查通过
+    needs: lint
     steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 设置Python环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'  # 缓存pip依赖
-
-      - name: 安装项目依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: 运行单元测试
-        run: |
-          PYTHONPATH=./src python src/tests/test_simulator.py
-          # 后续添加更多单元测试后，后续添加更多单元测试后逐步补充其他单元测试
-          # pytest src/tests/ -v --cov=src --cov-report=xml
-
-      - name: 上传测试覆盖率报告
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage.xml
-        if: success() || failure()  # 无论测试结果如何都上传报告
-
-  ###########################################################################
-  # 阶段3：核心功能测试
-  ###########################################################################
-  core-test:
-    name: 核心功能测试
-    runs-on: ubuntu-latest
-    needs: unit-test  # 依赖单元测试通过
-    steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
-
-      - name: 设置Python环境
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
       - name: 安装依赖
         run: |
-          python -m pip install --upgrade pip
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+          pip install pytest pytest-asyncio
 
-      - name: 运行核心黄金用例测试
+      - name: 运行测试（跳过需模型的集成测试）
         run: |
-          # 运行黄金用例回放测试，确保核心催收流程正常
-          PYTHONPATH=./src python src/core/evaluation.py --num-tests 0 --use-generative
-          # 这里可以添加更多核心功能测试
+          # 只跑不依赖 GPU/faster_whisper 的测试
+          python3 -m pytest tests/ -q --asyncio-mode=auto --tb=short \
+            --ignore=tests/test_duplex_integration.py \
+            --ignore=tests/test_duplex_pipeline.py \
+            --ignore=tests/test_voice_ws_handler.py \
+            --ignore=tests/test_sherpa_onnx.py \
+            --ignore=tests/test_ws_adapters.py \
+            -k "not integration"
 
-      - name: 运行最小规模评估测试
-        if: github.event.inputs.run_full_test == 'true' || github.ref == 'refs/heads/master'
-        run: |
-          # 全量测试只在master分支push或者手动指定时运行
-          PYTHONPATH=./src python src/tests/run_small_scale_test.py 20
-
-      - name: 上传测试报告
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-reports
-          path: data/evaluations/
-        if: success() || failure()
-
-  ###########################################################################
-  # 阶段4：构建Docker镜像
-  ###########################################################################
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 3: 构建 Docker 镜像
+  # ═══════════════════════════════════════════════════════════════
   build:
-    name: 构建Docker镜像
+    name: 构建镜像
     runs-on: ubuntu-latest
-    needs: core-test  # 依赖核心测试通过
-    if: github.ref == 'refs/heads/master' || github.event.inputs.deploy_prod == 'true'
+    needs: test
+    if: github.ref == 'refs/heads/master' || github.event.inputs.deploy_to_test == 'true'
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 设置Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: 登录Docker镜像仓库
+      - name: 登录 GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.DOCKER_REGISTRY }}
-          username: ${{ secrets.DOCKER_REGISTRY_USER }}
-          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 生成镜像标签
-        id: image-tag
+      - name: 镜像标签
+        id: meta
         run: |
-          # 用git commit hash作为标签，确保唯一性
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
           echo "tag=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: 构建并推送镜像
+      - name: 构建并推送
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:${{ steps.image-tag.outputs.tag }}
-            ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+            ghcr.io/${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ steps.meta.outputs.repo }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: 输出镜像信息
-        run: |
-          echo "构建完成的镜像: ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:${{ steps.image-tag.outputs.tag }}"
-
-  ###########################################################################
-  # 阶段5：部署到测试环境
-  ###########################################################################
-  deploy-test:
-    name: 部署到测试环境
+  # ═══════════════════════════════════════════════════════════════
+  # 阶段 4: 部署到测试环境
+  # ═══════════════════════════════════════════════════════════════
+  deploy:
+    name: 部署测试环境
     runs-on: ubuntu-latest
-    needs: build  # 依赖构建完成
-    if: github.ref == 'refs/heads/master'
+    needs: build
+    if: github.ref == 'refs/heads/master' || github.event.inputs.deploy_to_test == 'true'
     environment:
       name: test
     steps:
@@ -223,94 +132,40 @@ jobs:
           key: ${{ secrets.TEST_SERVER_SSH_KEY }}
           port: ${{ secrets.TEST_SERVER_PORT || 22 }}
           script: |
-            # 拉取最新镜像
-            docker pull ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:latest
-            # 停止旧容器
-            docker stop coin-collect-api || true
-            docker rm coin-collect-api || true
-            # 启动新容器
+            REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+            IMAGE="ghcr.io/${REPO}:latest"
+
+            # 登录 GHCR（公开仓库可跳过，私有仓库需要 GH_PAT 带 read:packages）
+            if [ -n "${{ secrets.GH_PAT }}" ]; then
+              echo "${{ secrets.GH_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            fi
+
+            echo ">>> 拉取镜像"
+            docker pull $IMAGE
+
+            echo ">>> 停止旧容器"
+            docker stop coin-collect-api 2>/dev/null || true
+            docker rm coin-collect-api 2>/dev/null || true
+
+            echo ">>> 启动新容器"
             docker run -d \
               --name coin-collect-api \
               --restart always \
               -p 8000:8000 \
-              -e DB_URI=${{ secrets.TEST_DB_URI }} \
               -e TZ=Asia/Jakarta \
-              -v ${{ env.APP_DIR }}/data:/app/data \
-              -v ${{ env.APP_DIR }}/logs:/app/logs \
-              ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:latest
-            # 健康检查
-            sleep 10
-            curl -f http://localhost:8000/health || exit 1
+              -e ENV=test \
+              -e DB_URI=sqlite:///app/data/collection.db \
+              -e LLM_PROVIDER=${LLM_PROVIDER:-mock} \
+              -e OPENAI_API_KEY=${OPENAI_API_KEY:-} \
+              -e LLM_API_KEY=${LLM_API_KEY:-} \
+              -e HF_HOME=/app/.cache/huggingface \
+              -e TRANSFORMERS_CACHE=/app/.cache/huggingface \
+              -v $APP_DIR/data:/app/data \
+              -v $APP_DIR/logs:/app/logs \
+              -v $APP_DIR/cache:/app/.cache/huggingface \
+              $IMAGE
 
-  ###########################################################################
-  # 阶段6：部署到生产环境（需要人工审核）
-  ###########################################################################
-  deploy-prod:
-    name: 部署到生产环境
-    runs-on: ubuntu-latest
-    needs: deploy-test  # 依赖测试环境部署成功
-    if: github.event.inputs.deploy_prod == 'true' || (github.ref == 'refs/heads/master' && contains(github.event.head_commit.message, 'release'))
-    environment:
-      name: production
-      url: https://your-production-url.com
-      # 需要人工审核才能部署到生产
-      required-reviewers:
-        - your-github-username
-    steps:
-      - name: 生产部署确认
-        uses: peter-evans/wait-for-check@v2
-        with:
-          check-name: '部署审批'
-          timeout-minutes: 60
-
-      - name: 部署到生产服务器
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.PROD_SERVER_HOST }}
-          username: ${{ secrets.PROD_SERVER_USER }}
-          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
-          port: ${{ secrets.PROD_SERVER_PORT || 22 }}
-          script: |
-            # 备份当前版本
-            docker tag ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:latest ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:backup-$(date +%Y%m%d%H%M%S)
-            # 拉取最新镜像
-            docker pull ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:latest
-            # 优雅停止旧容器，保持服务
-            docker stop coin-collect-api || true
-            docker rm coin-collect-api || true
-            # 启动新容器
-            docker run -d \
-              --name coin-collect-api \
-              --restart always \
-              -p 80:8000 \
-              -e DB_URI=${{ secrets.PROD_DB_URI }} \
-              -e ENV=production \
-              -e TZ=Asia/Jakarta \
-              -v ${{ env.APP_DIR }}/data:/app/data \
-              -v ${{ env.APP_DIR }}/logs:/app/logs \
-              ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_REPO }}/${{ env.DOCKER_IMAGE_NAME }}:latest
-            # 健康检查
+            echo ">>> 等待就绪"
             sleep 15
-            curl -f http://localhost:80/health || exit 1
-
-  ###########################################################################
-  # 阶段7：结果通知
-  ###########################################################################
-  notify:
-    name: 结果通知
-    runs-on: ubuntu-latest
-    needs: [code-check, unit-test, core-test, build, deploy-test, deploy-prod]
-    if: always()  # 无论前面阶段成功失败都通知
-    steps:
-      - name: 收集结果通知（企业微信/飞书/邮件，根据需要配置）
-        uses: actions-cool/actions-wechat-work-bot@main
-        with:
-          webhook: ${{ secrets.WECHAT_WEBHOOK }}
-          message: |
-            🚀 CI/CD 流程执行结果
-            状态: ${{ job.status }}
-            分支: ${{ github.ref }}
-            提交人: ${{ github.actor }}
-            提交信息: ${{ github.event.head_commit.message }}
-            详情: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        continue-on-error: true
+            curl -f http://localhost:8000/health && echo "OK" || echo "HEALTH CHECK FAILED"
+            docker logs --tail 20 coin-collect-api

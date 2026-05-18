@@ -1,42 +1,43 @@
 # 印尼智能催收系统 Docker 镜像
-# 基于Python 3.10 slim版本，兼顾大小和功能
+# 基于 Python 3.10 slim，面向 Linux/CPU 测试环境
 FROM python:3.10-slim-bookworm
 
-# 环境变量配置
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV ENV production
-ENV TZ Asia/Jakarta
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV ENV=production
+ENV TZ=Asia/Jakarta
 
-# 设置工作目录
+# HuggingFace 模型缓存目录（可通过 volume 持久化）
+ENV HF_HOME=/app/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+
 WORKDIR /app
 
-# 安装系统依赖
+# 系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     build-essential \
     curl \
-    ffmpeg \  # 语音处理需要
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# 先复制requirements.txt，利用Docker缓存
+# 先复制 requirements.txt
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
 
-# 复制项目代码
+# 1. CPU-only PyTorch 先装（防止 transformers 等包拉取 CUDA 版 torch）
+# 2. 其余依赖（grep -v 排除 torch 行）
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir $(grep -v '^torch' requirements.txt)
+
 COPY . .
 
-# 创建必要的目录
-RUN mkdir -p /app/data /app/logs /app/tmp
+RUN mkdir -p /app/data /app/logs /app/tmp /app/.cache/huggingface
 
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# 暴露端口
 EXPOSE 8000
 
-# 启动命令
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

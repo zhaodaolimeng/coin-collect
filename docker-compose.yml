@@ -14,13 +14,17 @@ services:
       - TZ=Asia/Jakarta
       - ENV=${ENV:-development}
       - DB_URI=${DB_URI:-sqlite:///./data/collection.db}
-      # 其他环境变量根据需要添加
-      # - ASR_API_KEY=${ASR_API_KEY}
-      # - TTS_API_KEY=${TTS_API_KEY}
+      - HF_HOME=/app/.cache/huggingface
+      - TRANSFORMERS_CACHE=/app/.cache/huggingface
+      - LLM_PROVIDER=${LLM_PROVIDER:-mock}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./tmp:/app/tmp
+      - huggingface_cache:/app/.cache/huggingface
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -46,3 +50,6 @@ services:
 
 # volumes:
 #   mysql_data:
+
+volumes:
+  huggingface_cache:

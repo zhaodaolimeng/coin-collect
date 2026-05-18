@@ -1,57 +1,48 @@
-# Git相关
+# Git
 .git
 .gitignore
-.github
+.gitattributes
 
-# Python缓存
+# Python
 __pycache__
 *.pyc
 *.pyo
-*.pyd
-.Python
-env
-venv
-ENV
 .venv
-pip-log.txt
-pip-delete-this-directory.txt
-.tox
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*,cover
-.hypothesis/
-.pytest_cache/
+venv
+env
+*.egg-info
+dist
+build
 
 # IDE
 .vscode
 .idea
+.claude
+.codex
 *.swp
 *.swo
-*~
 
-# 敏感数据和大文件
-data/*
-!data/behavior_analysis/customer_response_corpus.json  # 只保留必要的语料库
-logs/*
-tmp/*
-*.env
-*.env.*
-secrets/
-*.db
-*.sqlite3
-*.tar.gz
-*.zip
-models/*.bin  # 大模型文件如果需要单独管理可以排除
+# Data (volume-mounted at runtime)
+data/
+logs/
+tmp/
 
-# 文档
-docs/*.md
-README.md
-TODO.md
+# Test artifacts
+.pytest_cache
+htmlcov
+.coverage
+coverage.xml
 
-# CI/CD相关
-.github/
-.gitlab-ci.yml
-Jenkinsfile
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env (should be injected at runtime)
+.env
+.env.*
+!.env.example
