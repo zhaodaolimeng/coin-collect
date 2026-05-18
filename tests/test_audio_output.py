@@ -9,6 +9,22 @@ from core.voice.audio_output import DuplexAudioOutput, PlaybackResult
 from core.voice.audio_source import SilentSource
 
 
+def _has_audio_output() -> bool:
+    """检测是否有可用的音频输出设备"""
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        return any(d["max_output_channels"] > 0 for d in devices)
+    except Exception:
+        return False
+
+
+requires_audio = pytest.mark.skipif(
+    not _has_audio_output(),
+    reason="无音频输出设备（CI 环境）",
+)
+
+
 def make_silence(duration_s: float, sr: int = 16000) -> np.ndarray:
     return np.zeros(int(duration_s * sr), dtype=np.float32)
 
@@ -19,6 +35,7 @@ def make_tone(duration_s: float, freq: float = 440.0, sr: int = 16000) -> np.nda
 
 
 @pytest.mark.asyncio
+@requires_audio
 async def test_playback_completes_normally():
     """安静环境下播放完整"""
     source = SilentSource()
@@ -31,6 +48,7 @@ async def test_playback_completes_normally():
 
 
 @pytest.mark.asyncio
+@requires_audio
 async def test_stop_immediately():
     """stop() 立即停止播放"""
     source = SilentSource()
@@ -61,6 +79,7 @@ def test_duplex_output_initial_state():
 
 
 @pytest.mark.asyncio
+@requires_audio
 async def test_ducking_recovery_false_alarm():
     """短暂噪音后恢复正常播放（静音源不触发打断）"""
     source = SilentSource()
