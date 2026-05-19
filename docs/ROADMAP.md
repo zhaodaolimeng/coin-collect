@@ -217,7 +217,38 @@
 
 ---
 
-### 🔹 P1.5 对话效果迭代优化（短周期，无需生产数据，目标成功率 70% → 85%+）
+### 🔹 P1.0 工程基础清理（架构审计整改，上线前建议完成）
+
+> 2026-05-18 架构审计发现 7 个硬伤。3 个一线 bug 已修复（workers=1、DB_URI 读环境变量、per-turn state）。剩余 4 个快速收口 + 3 个结构解耦任务。
+
+#### 阶段 1：快速收口（每项 0.5-1 天）
+
+| 事项ID | 具体内容 | 前置依赖 | 优先级 |
+|--------|----------|----------|--------|
+| P10-01 | **`/health` 端点做真检查**：当前静态返回 healthy，改为验证 DB 连接 + ASR pipeline + TTS 引擎，任一不可用返回 degraded + 故障组件列表。Docker HEALTHCHECK 依赖此端点 | 无 | P0 |
+| P10-02 | **ChatState 枚举统一**：当前 chatbot.py / llm_fallback.py / schemas.py 三份独立定义，手动维护映射表。目标：llm_fallback 删除自有的 ChatState，schemas.py 成员与 chatbot 一一对应，`convert_bot_state_to_schema()` 改为自动映射（`bot_state.name.lower()`） | 无 | P0 |
+| P10-03 | **CORS 收紧**：当前 `allow_origins=["*"]` + `allow_credentials=True` 违反 CORS 规范。改为从环境变量 `CORS_ORIGINS` 读取，`allow_credentials` 仅在非通配时启用 | 无 | P1 |
+| P10-04 | **测试目录归并**：测试分散在 `tests/`(18) + `src/tests/`(11) + `src/experiments/`(2) 三处。全部归并到 `tests/`，CI 自动扩大覆盖范围 | 无 | P1 |
+
+#### 阶段 2：结构解耦（每项 2-3 天）
+
+| 事项ID | 具体内容 | 前置依赖 | 优先级 |
+|--------|----------|----------|--------|
+| P10-05 | **CollectionChatBot 拆分层**：2600 行 god class 拆为 5 个模块——`session_state.py`(状态机+转移规则) / `intent_processor.py`(意图识别) / `response_policy.py`(脚本选择+策略调整) / `voice_adapter.py`(TTS+ASR纠错) / `chatbot.py`(仅做编排，~300行) | P10-02 完成 | P1 |
+| P10-06 | **配置统一入口**：新建 `src/core/config.py`，所有环境变量、默认值、启动校验集中管理。替换各处散落的 `os.getenv()` 和硬编码 | P10-01 部分相关 | P1 |
+| P10-07 | **能力可见性（Capability Registry）**：新建 `src/core/capabilities.py`，启动时检测 ASR/TTS/LLM/翻译各能力状态并注册。`/health` 直接读取此注册表。替代当前 `try/except ImportError` 静默降级模式 | P10-01 完成 | P1 |
+
+#### 阶段 3：基础设施升级（每项 3-5 天，功能稳定后做）
+
+| 事项ID | 具体内容 | 前置依赖 | 优先级 |
+|--------|----------|----------|--------|
+| P10-08 | **Session Store 外置**：当前 `active_sessions` 是进程内存 dict，workers=1 是临时方案。上 Redis 做 session 路由，恢复多 worker 支持 | P10-05 完成 | P2 |
+| P10-09 | **Turn 持久化改为追加式**：当前每轮 DELETE 全量旧 turn 再 INSERT 全量新 turn。改为按 `(session_id, turn_number)` upsert，保留审计轨迹 | P10-05 完成 | P2 |
+| P10-10 | **实验代码与产品代码分离**：`src/experiments/`(17脚本+3子目录) 移到项目根 `experiments/`，src/ 只保留可部署代码 | 无 | P2 |
+
+> 优先级建议：阶段 1 四项可在一周内并行完成，建议下个迭代启动。阶段 2 在阶段 1 完成后分批推进，P10-05（拆类）是最大单项，需 2-3 天。阶段 3 等核心功能稳定后再做。
+
+---### 🔹 P1.5 对话效果迭代优化（短周期，无需生产数据，目标成功率 70% → 85%+）
 
 > 基于现有资产（1130条标注数据、681条黄金测试集、119条鲁棒性用例），通过话术/策略/记忆等多维改进提升核心指标。每个方向可独立推进，互不阻塞。
 
