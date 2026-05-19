@@ -10,7 +10,7 @@ import random
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 from pathlib import Path
 import json
 from datetime import datetime
@@ -70,6 +70,7 @@ class ChatTurn:
     """对话回合"""
     agent: str
     customer: Optional[str] = None
+    state: Optional[Any] = None  # ChatState at the time this turn was created
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     latency_ms: Optional[float] = None
 
@@ -1339,7 +1340,7 @@ class CollectionChatBot:
             # 教育型策略：身份核实后追加简短合同说明
             if self.strategy.education_emphasis:
                 identity_verify += " " + self._get_script("educate_intro")
-            self.conversation.append(ChatTurn(agent=identity_verify))
+            self.conversation.append(ChatTurn(agent=identity_verify, state=self.state))
             audio_file = await self._tts_speak(identity_verify, use_tts)
             return identity_verify, audio_file
 
@@ -1402,7 +1403,7 @@ class CollectionChatBot:
             # 已在 LLM 兜底状态，继续用 LLM 处理
             response = await self._process_llm_fallback(corrected_input, detected_time)
             if response:
-                self.conversation.append(ChatTurn(agent=response))
+                self.conversation.append(ChatTurn(agent=response, state=self.state))
             audio_file = await self._tts_speak(response, use_tts)
             return response, audio_file
 
@@ -1415,7 +1416,7 @@ class CollectionChatBot:
                 self.state = ChatState.LLM_FALLBACK
                 response = await self._process_llm_fallback(corrected_input, detected_time)
                 if response:
-                    self.conversation.append(ChatTurn(agent=response))
+                    self.conversation.append(ChatTurn(agent=response, state=self.state))
                 audio_file = await self._tts_speak(response, use_tts)
                 return response, audio_file
 
@@ -1424,7 +1425,7 @@ class CollectionChatBot:
             response, silence_next_state = self._handle_silence()
             if silence_next_state is not None:
                 self.state = silence_next_state
-            self.conversation.append(ChatTurn(agent=response))
+            self.conversation.append(ChatTurn(agent=response, state=self.state))
             audio_file = await self._tts_speak(response, use_tts)
             return response, audio_file
 
@@ -1917,7 +1918,7 @@ class CollectionChatBot:
 
         # 记录机器人回复
         if response:
-            self.conversation.append(ChatTurn(agent=response))
+            self.conversation.append(ChatTurn(agent=response, state=self.state))
 
         self.state = next_state
         audio_file = await self._tts_speak(response, use_tts)

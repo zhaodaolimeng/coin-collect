@@ -162,12 +162,13 @@ def save_session_to_db(db: Session, bot: CollectionChatBot, chat_group: str):
     db.flush()
 
     for turn_num, turn in enumerate(bot.conversation, 1):
+        turn_state = turn.state if turn.state is not None else bot.state
         db_turn = DBChatTurn(
             session_id=db_session.id,
             turn_number=turn_num,
             agent_text=turn.agent,
             customer_text=turn.customer,
-            state=get_stage_from_state(bot.state),
+            state=get_stage_from_state(turn_state),
             timestamp=turn.timestamp,
         )
         db.add(db_turn)
@@ -255,12 +256,13 @@ async def chat_turn(request: ChatTurnRequest, db: Session = Depends(get_db)):
                 DBChatTurn.session_id == db_session.id
             ).delete()
             for i, turn in enumerate(bot.conversation):
+                turn_state = turn.state if turn.state is not None else bot.state
                 db_turn = DBChatTurn(
                     session_id=db_session.id,
                     turn_number=i + 1,
                     agent_text=turn.agent,
                     customer_text=turn.customer,
-                    state=get_stage_from_state(bot.state),
+                    state=get_stage_from_state(turn_state),
                     timestamp=turn.timestamp,
                 )
                 db.add(db_turn)
@@ -906,12 +908,13 @@ async def voice_turn(request: VoiceTurnRequest, db: Session = Depends(get_db)):
                 DBChatTurn.session_id == db_session.id
             ).delete()
             for i, turn in enumerate(bot.conversation):
+                turn_state = turn.state if turn.state is not None else bot.state
                 db_turn = DBChatTurn(
                     session_id=db_session.id,
                     turn_number=i + 1,
                     agent_text=turn.agent,
                     customer_text=turn.customer,
-                    state=get_stage_from_state(bot.state),
+                    state=get_stage_from_state(turn_state),
                     timestamp=turn.timestamp,
                 )
                 db.add(db_turn)

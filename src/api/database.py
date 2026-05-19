@@ -3,13 +3,17 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 from pathlib import Path
+import os
 
 
-DATABASE_PATH = Path(__file__).parent.parent.parent / "data" / "collections.db"
-DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
+_DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "collection.db"
+_DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = os.getenv("DB_URI", f"sqlite:///{_DEFAULT_DB_PATH}")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
