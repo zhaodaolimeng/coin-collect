@@ -95,9 +95,10 @@ class MessageResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: str
+    status: str       # healthy | degraded | unhealthy
     version: str
     timestamp: str
+    checks: Dict[str, str] = {}  # component_name → status
 
 
 class StatsResponse(BaseModel):

@@ -2,7 +2,9 @@ from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from sqlalchemy.orm import Session
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -48,6 +50,7 @@ from api.schemas import (
 from api.database import (
     get_db,
     init_db,
+    SessionLocal,
     ChatSession as DBChatSession,
     ChatTurn as DBChatTurn,
 )
@@ -140,10 +143,49 @@ async def startup_event():
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
+    checks: Dict[str, str] = {}
+
+    # 1. 数据库连接
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {e}"
+
+    # 2. ASR 模型
+    if _asr_pipeline_cache is not None and _asr_pipeline_cache.is_available:
+        checks["asr"] = "ok"
+    else:
+        checks["asr"] = "unavailable"
+
+    # 3. TTS 引擎 (edge-tts 是主力)
+    try:
+        import edge_tts  # noqa: F811
+        checks["tts"] = "ok"
+    except ImportError:
+        checks["tts"] = "unavailable"
+
+    # 4. LLM provider
+    checks["llm"] = os.getenv("LLM_PROVIDER", "mock")
+
+    # 综合判定
+    has_error = any(v.startswith("error:") for v in checks.values())
+    has_unavailable = any(v == "unavailable" for v in checks.values())
+
+    if has_error:
+        status = "unhealthy"
+    elif has_unavailable:
+        status = "degraded"
+    else:
+        status = "healthy"
+
     return HealthResponse(
-        status="healthy",
+        status=status,
         version="1.0.0",
         timestamp=datetime.now().isoformat(),
+        checks=checks,
     )
 
 
