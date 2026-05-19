@@ -55,6 +55,7 @@ from api.database import (
     ChatTurn as DBChatTurn,
 )
 from core.chatbot import (
+    ChatState as BotChatState,
     CollectionChatBot,
     get_stage_from_state,
 )
@@ -73,31 +74,16 @@ from core.translator import translate_text
 
 
 def convert_bot_state_to_schema(bot_state):
-    """将chatbot的状态转换为schema兼容的状态"""
-    state_map = {
-        'INIT': 'init',
-        'GREETING': 'greeting',
-        'IDENTITY_VERIFY': 'identify',
-        'PURPOSE': 'purpose',
-        'ASK_TIME': 'ask_time',
-        'PUSH_FOR_TIME': 'push_for_time',
-        'COMMIT_TIME': 'commit_time',
-        'CONFIRM_EXTENSION': 'negotiate',
-        'HANDLE_OBJECTION': 'negotiate',
-        'HANDLE_BUSY': 'close',
-        'HANDLE_WRONG_NUMBER': 'close',
-        'CLOSE': 'close',
-        'FAILED': 'failed',
-        'LLM_FALLBACK': 'push_for_time'
-    }
+    """将 chatbot.ChatState 转为 API schema 的字符串值。
 
-    # 获取状态名称
-    if hasattr(bot_state, 'name'):
-        state_name = bot_state.name
-    else:
-        state_name = str(bot_state).split('.')[-1]
-
-    return state_map.get(state_name, 'init')
+    依赖 schemas.ChatState 成员名与 chatbot.ChatState 对齐，
+    通过枚举名直接查表，不再手写映射。
+    """
+    name = bot_state.name if hasattr(bot_state, 'name') else str(bot_state).split('.')[-1]
+    try:
+        return ChatState[name].value
+    except KeyError:
+        return "init"
 
 
 app = FastAPI(
@@ -986,8 +972,7 @@ async def voice_end(request: VoiceTurnRequest, db: Session = Depends(get_db)):
         return {"status": "not_found", "message": "会话不存在或已过期"}
 
     bot = active_sessions[session_id]
-    from core.chatbot import ChatState
-    bot.state = ChatState.CLOSE
+    bot.state = BotChatState.CLOSE
 
     # Update existing DB record (don't INSERT duplicate)
     db_session = db.query(DBChatSession).filter(
@@ -1312,7 +1297,6 @@ async def voice_simulate_stream(
                     pass
 
             # 发送完成事件
-            from core.chatbot import ChatState
             report = sim.get_report()
             logger.info(f"[SSE:{conn_id}] Simulation complete — turns={report.total_turns} state={report.final_state} committed_time={report.committed_time}")
             done_data = {

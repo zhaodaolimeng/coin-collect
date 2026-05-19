@@ -7,7 +7,6 @@
 import random
 import asyncio
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from typing import List, Dict, Optional, Tuple, Any, Callable
 from pathlib import Path
 import json
@@ -16,19 +15,7 @@ import sys
 import io
 
 
-class ChatState(Enum):
-    """对话状态枚举"""
-    INIT = auto()
-    GREETING = auto()
-    IDENTIFY = auto()
-    PURPOSE = auto()
-    ASK_TIME = auto()
-    PUSH_FOR_TIME = auto()
-    COMMIT_TIME = auto()
-    CONFIRM = auto()
-    CLOSE = auto()
-    FAILED = auto()
-    LLM_FALLBACK = auto()  # 新增：LLM兜底状态
+from core.chatbot import ChatState  # noqa: E402 — 统一使用 chatbot 的权威定义
 
 
 @dataclass
@@ -384,12 +371,12 @@ class CollectionChatBotV4:
         next_state = self.state
 
         if self.state == ChatState.GREETING:
-            next_state = ChatState.IDENTIFY
+            next_state = ChatState.IDENTITY_VERIFY
             greeting_resp = self._get_script("greeting_response")
             identify = self._get_script("identify")
             response = f"{greeting_resp} {identify}"
 
-        elif self.state == ChatState.IDENTIFY:
+        elif self.state == ChatState.IDENTITY_VERIFY:
             next_state = ChatState.PURPOSE
             response = self._get_script("purpose")
 
@@ -425,10 +412,10 @@ class CollectionChatBotV4:
                     next_state = ChatState.FAILED
 
         elif self.state == ChatState.COMMIT_TIME:
-            next_state = ChatState.CONFIRM
+            next_state = ChatState.CONFIRM_EXTENSION
             response = self._get_script("confirm")
 
-        elif self.state == ChatState.CONFIRM:
+        elif self.state == ChatState.CONFIRM_EXTENSION:
             next_state = ChatState.CLOSE
             wait = self._get_script("wait", time=self.commit_time) if self.commit_time else "Saya tunggu ya."
             closing = self._get_script("closing")

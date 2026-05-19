@@ -5,17 +5,21 @@ from datetime import datetime
 
 
 class ChatState(str, Enum):
+    """API 层状态枚举 — 成员名与 chatbot.ChatState 对齐，值为前端契约字符串"""
     INIT = "init"
     GREETING = "greeting"
-    IDENTIFY = "identify"
+    IDENTITY_VERIFY = "identify"
     PURPOSE = "purpose"
+    HANDLE_OBJECTION = "negotiate"
     ASK_TIME = "ask_time"
     PUSH_FOR_TIME = "push_for_time"
     COMMIT_TIME = "commit_time"
-    CONFIRM = "confirm"
-    NEGOTIATE = "negotiate"
+    CONFIRM_EXTENSION = "confirm"
+    HANDLE_BUSY = "close"
+    HANDLE_WRONG_NUMBER = "close"
     CLOSE = "close"
     FAILED = "failed"
+    LLM_FALLBACK = "push_for_time"
 
 
 class ChatGroup(str, Enum):
